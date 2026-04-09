@@ -1,0 +1,3 @@
+[submodule "Enigma-Dialect"]
+	path = Enigma-Dialect
+	url = git@github.com:Klyne-Research/Enigma-Dialect.git

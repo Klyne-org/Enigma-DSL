@@ -1,0 +1,11 @@
+# Reference repos (submodules / vendored)
+cutlass/
+gpt-oss-metal-kernels/
+LLAIR/
+
+# Reference documents
+cute_layout.pdf
+metal_cute_lowering.excalidraw
+
+# OS files
+.DS_Store
