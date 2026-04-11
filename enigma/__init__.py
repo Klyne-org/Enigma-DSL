@@ -1,5 +1,7 @@
 """Enigma — A Python DSL for Apple Metal GPU kernels."""
 
+from enigma._version import __version__
+
 from .typing import Float32, Float16, BFloat16, Int32, UInt32, f32, f16, bf16, i32, u32
 from .core import (
     Layout, make_layout, make_ordered_layout, make_identity_layout,

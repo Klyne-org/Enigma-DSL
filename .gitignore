@@ -9,6 +9,7 @@ metal_cute_lowering.excalidraw
 ENIGMA_DSL_IMPLEMENTATION_PLAN.md
 
 # Build artifacts
+enigma/_version.py
 *.dylib
 *.metallib
 *.air
