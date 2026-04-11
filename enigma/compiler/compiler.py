@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .kernel import KernelDef, JitDef, _JitContext, trace_kernel
+from .kernel import JitDef, KernelDef, _JitContext, trace_kernel
 from .metal_emitter import emit_metal
 
 
@@ -34,29 +34,43 @@ class CompiledKernel:
         return path
 
 
-def compile(fn, *args, keep_metal_source=False, dump_ir=False, work_dir=None,
-            vec_width=0) -> CompiledKernel:
+def compile(
+    fn, *args, keep_metal_source=False, dump_ir=False, work_dir=None, vec_width=0
+) -> CompiledKernel:
     """Compile @enigma.kernel (naive) or @enigma.jit (TV layout) to .metallib.
 
     vec_width: emit buffer pointers as vector types (e.g. 4 -> float4*).
                Threads = total_elements / vec_width.
     """
     if isinstance(fn, JitDef):
-        return _compile_jit(fn, args, dump_ir=dump_ir,
-                            keep_metal_source=keep_metal_source, work_dir=work_dir,
-                            vec_width=vec_width)
+        return _compile_jit(
+            fn,
+            args,
+            dump_ir=dump_ir,
+            keep_metal_source=keep_metal_source,
+            work_dir=work_dir,
+            vec_width=vec_width,
+        )
     elif isinstance(fn, KernelDef):
-        return _compile_naive(fn, dump_ir=dump_ir,
-                              keep_metal_source=keep_metal_source, work_dir=work_dir,
-                              vec_width=vec_width)
+        return _compile_naive(
+            fn,
+            dump_ir=dump_ir,
+            keep_metal_source=keep_metal_source,
+            work_dir=work_dir,
+            vec_width=vec_width,
+        )
     raise TypeError(f"Expected @enigma.kernel or @enigma.jit, got {type(fn).__name__}")
 
 
 def _compile_naive(kernel_fn, *, dump_ir, keep_metal_source, work_dir, vec_width):
     builder = trace_kernel(kernel_fn)
-    return _emit_and_build(builder, dump_ir=dump_ir,
-                           keep_metal_source=keep_metal_source, work_dir=work_dir,
-                           vec_width=vec_width)
+    return _emit_and_build(
+        builder,
+        dump_ir=dump_ir,
+        keep_metal_source=keep_metal_source,
+        work_dir=work_dir,
+        vec_width=vec_width,
+    )
 
 
 def _compile_jit(jit_fn, tensor_args, *, dump_ir, keep_metal_source, work_dir, vec_width):
@@ -67,15 +81,21 @@ def _compile_jit(jit_fn, tensor_args, *, dump_ir, keep_metal_source, work_dir, v
             f"@jit function '{jit_fn.name}' did not launch any kernel. "
             f"Call kernel_fn(...).launch(grid=..., block=...) inside it."
         )
-    compiled = _emit_and_build(ctx.builder, dump_ir=dump_ir,
-                               keep_metal_source=keep_metal_source, work_dir=work_dir,
-                               vec_width=vec_width)
+    compiled = _emit_and_build(
+        ctx.builder,
+        dump_ir=dump_ir,
+        keep_metal_source=keep_metal_source,
+        work_dir=work_dir,
+        vec_width=vec_width,
+    )
     compiled.grid = ctx.grid
     compiled.block = ctx.block
     return compiled
 
 
-def _emit_and_build(builder, *, dump_ir, keep_metal_source, work_dir, vec_width=0) -> CompiledKernel:
+def _emit_and_build(
+    builder, *, dump_ir, keep_metal_source, work_dir, vec_width=0
+) -> CompiledKernel:
     if dump_ir:
         print(f"=== IR: {builder.kernel_name} ({len(builder.ops)} ops) ===")
         for op in builder.ops:
@@ -109,8 +129,10 @@ def _emit_and_build(builder, *, dump_ir, keep_metal_source, work_dir, vec_width=
                 os.remove(p)
 
     return CompiledKernel(
-        kernel_name=builder.kernel_name, metallib_path=metallib_path,
-        metallib_bytes=metallib_bytes, metal_source=metal_source,
+        kernel_name=builder.kernel_name,
+        metallib_path=metallib_path,
+        metallib_bytes=metallib_bytes,
+        metal_source=metal_source,
     )
 
 

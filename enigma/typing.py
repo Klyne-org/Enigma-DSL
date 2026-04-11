@@ -12,11 +12,30 @@ class Numeric:
         return self.metal_name
 
 
-class Float32(Numeric):  width = 32; metal_name = "float"
-class Float16(Numeric):  width = 16; metal_name = "half"
-class BFloat16(Numeric): width = 16; metal_name = "bfloat"
-class Int32(Numeric):    width = 32; metal_name = "int"
-class UInt32(Numeric):   width = 32; metal_name = "uint"
+class Float32(Numeric):
+    width = 32
+    metal_name = "float"
+
+
+class Float16(Numeric):
+    width = 16
+    metal_name = "half"
+
+
+class BFloat16(Numeric):
+    width = 16
+    metal_name = "bfloat"
+
+
+class Int32(Numeric):
+    width = 32
+    metal_name = "int"
+
+
+class UInt32(Numeric):
+    width = 32
+    metal_name = "uint"
+
 
 f32 = Float32()
 f16 = Float16()

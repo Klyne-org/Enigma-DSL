@@ -1,17 +1,20 @@
 """Tensor = pointer + Layout. Supports both JIT-time symbolic ops and kernel-time IR tracing."""
 
 from __future__ import annotations
+
 from typing import Any
 
-from .core import Layout, zipped_divide as _layout_zipped_divide
-from .tuple import crd2idx, flatten, idx2crd, is_int, is_tuple, product
+from .core import Layout
+from .core import zipped_divide as _layout_zipped_divide
+from .tuple import flatten, idx2crd, is_int, is_tuple, product
 
 
 class Tensor:
     """A tensor: buffer name + layout + base offset (int or IRValue)."""
 
-    def __init__(self, name: str, buffer_index: int, metal_dtype: str,
-                 layout: Layout, base_offset: Any = 0):
+    def __init__(
+        self, name: str, buffer_index: int, metal_dtype: str, layout: Layout, base_offset: Any = 0
+    ):
         self.name = name
         self.buffer_index = buffer_index
         self.metal_dtype = metal_dtype
@@ -19,11 +22,16 @@ class Tensor:
         self.base_offset = base_offset
 
     @property
-    def shape(self):  return self.layout.shape
+    def shape(self):
+        return self.layout.shape
+
     @property
-    def stride(self): return self.layout.stride
+    def stride(self):
+        return self.layout.stride
+
     @property
-    def element_type(self): return self.metal_dtype
+    def element_type(self):
+        return self.metal_dtype
 
     def size(self, mode=None):
         return self.layout.size(mode)
@@ -57,39 +65,55 @@ class Tensor:
                     ss = s_i[j]
                     dd = d_i[j] if is_tuple(d_i) else d_i
                     if cc is None:
-                        sub_shapes.append(ss); sub_strides.append(dd)
+                        sub_shapes.append(ss)
+                        sub_strides.append(dd)
                     elif isinstance(cc, IRValue):
                         offset = _add_ir_offset(offset, cc, ss, dd)
                     elif is_int(cc):
                         offset = _add_static_offset(offset, cc, ss, dd)
                 if sub_shapes:
                     new_shapes.append(sub_shapes[0] if len(sub_shapes) == 1 else tuple(sub_shapes))
-                    new_strides.append(sub_strides[0] if len(sub_strides) == 1 else tuple(sub_strides))
+                    new_strides.append(
+                        sub_strides[0] if len(sub_strides) == 1 else tuple(sub_strides)
+                    )
 
         if not new_shapes:
             return offset
 
         new_shape = new_shapes[0] if len(new_shapes) == 1 else tuple(new_shapes)
         new_stride = new_strides[0] if len(new_strides) == 1 else tuple(new_strides)
-        return Tensor(self.name, self.buffer_index, self.metal_dtype,
-                      Layout(new_shape, new_stride), base_offset=offset)
+        return Tensor(
+            self.name,
+            self.buffer_index,
+            self.metal_dtype,
+            Layout(new_shape, new_stride),
+            base_offset=offset,
+        )
 
     def __setitem__(self, coord, value):
         """Simple 1D store for naive kernels."""
-        from ._tracing import IRValue, IROp, get_builder
+        from ._tracing import IROp, IRValue, get_builder
+
         if not isinstance(coord, tuple):
             coord = (coord,)
         if len(coord) == 1 and isinstance(coord[0], IRValue):
             builder = get_builder()
             assert builder is not None
-            builder.record(IROp("store", None, [coord[0], value],
-                                attrs={"buffer": self.name, "buffer_index": self.buffer_index}))
+            builder.record(
+                IROp(
+                    "store",
+                    None,
+                    [coord[0], value],
+                    attrs={"buffer": self.name, "buffer_index": self.buffer_index},
+                )
+            )
             return
         raise TypeError("Use .store() for TV-layout kernels")
 
     def load(self):
         """Vectorized load of all elements in this tensor view."""
         from ._tracing import IROp, get_builder
+
         builder = get_builder()
         assert builder is not None
 
@@ -99,16 +123,27 @@ class Tensor:
 
         result = builder.new_value(self.metal_dtype)
         result._tv_groups = groups
-        builder.record(IROp("tv_load", result, [], attrs={
-            "buffer": self.name, "buffer_index": self.buffer_index,
-            "base_offset": self.base_offset, "groups": groups,
-            "dtype": self.metal_dtype, "num_elements": n_elem,
-        }))
+        builder.record(
+            IROp(
+                "tv_load",
+                result,
+                [],
+                attrs={
+                    "buffer": self.name,
+                    "buffer_index": self.buffer_index,
+                    "base_offset": self.base_offset,
+                    "groups": groups,
+                    "dtype": self.metal_dtype,
+                    "num_elements": n_elem,
+                },
+            )
+        )
         return result
 
     def store(self, value):
         """Vectorized store of all elements."""
         from ._tracing import IROp, get_builder
+
         builder = get_builder()
         assert builder is not None
 
@@ -116,11 +151,21 @@ class Tensor:
         n_elem = product(self.layout.shape)
         groups = _group_contiguous(_compute_value_offsets(flat_s, flat_d, n_elem))
 
-        builder.record(IROp("tv_store", None, [value], attrs={
-            "buffer": self.name, "buffer_index": self.buffer_index,
-            "base_offset": self.base_offset, "groups": groups,
-            "dtype": self.metal_dtype, "num_elements": n_elem,
-        }))
+        builder.record(
+            IROp(
+                "tv_store",
+                None,
+                [value],
+                attrs={
+                    "buffer": self.name,
+                    "buffer_index": self.buffer_index,
+                    "base_offset": self.base_offset,
+                    "groups": groups,
+                    "dtype": self.metal_dtype,
+                    "num_elements": n_elem,
+                },
+            )
+        )
 
     def __repr__(self):
         return f"Tensor({self.name}, layout={self.layout}, offset={self.base_offset})"
@@ -131,7 +176,9 @@ def tensor_composition(tensor: Tensor, tv_layout: Layout, tiler) -> Tensor:
 
     Converts TV layout strides from col-major tile indices to actual memory offsets.
     """
-    tile_stride = tensor.layout.stride if is_tuple(tensor.layout.stride) else (tensor.layout.stride,)
+    tile_stride = (
+        tensor.layout.stride if is_tuple(tensor.layout.stride) else (tensor.layout.stride,)
+    )
     tiler_t = tiler if is_tuple(tiler) else (tiler,)
 
     def _convert_stride(tile_linear_stride):
@@ -143,15 +190,25 @@ def tensor_composition(tensor: Tensor, tv_layout: Layout, tiler) -> Tensor:
         return tuple(_convert_stride(s) for s in tile_linear_stride)
 
     new_stride = (_convert_stride(tv_layout.stride[0]), _convert_stride(tv_layout.stride[1]))
-    return Tensor(tensor.name, tensor.buffer_index, tensor.metal_dtype,
-                  Layout(tv_layout.shape, new_stride), base_offset=tensor.base_offset)
+    return Tensor(
+        tensor.name,
+        tensor.buffer_index,
+        tensor.metal_dtype,
+        Layout(tv_layout.shape, new_stride),
+        base_offset=tensor.base_offset,
+    )
 
 
 def tensor_zipped_divide(tensor: Tensor, tiler) -> Tensor:
     """Tile a tensor using zipped_divide."""
     new_layout = _layout_zipped_divide(tensor.layout, tiler)
-    return Tensor(tensor.name, tensor.buffer_index, tensor.metal_dtype,
-                  new_layout, base_offset=tensor.base_offset)
+    return Tensor(
+        tensor.name,
+        tensor.buffer_index,
+        tensor.metal_dtype,
+        new_layout,
+        base_offset=tensor.base_offset,
+    )
 
 
 def make_identity_tensor(shape) -> Tensor:
@@ -159,6 +216,7 @@ def make_identity_tensor(shape) -> Tensor:
 
 
 # --- Internal helpers ---
+
 
 def _add_static_offset(base, idx: int, shape, stride):
     if is_tuple(shape):

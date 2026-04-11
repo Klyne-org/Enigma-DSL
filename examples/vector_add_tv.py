@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
+
 import enigma
 from enigma.tensor import Tensor, tensor_composition, tensor_zipped_divide
 
@@ -55,7 +58,7 @@ mC = Tensor("C", 2, "float", enigma.Layout((M, N), (N, 1)))
 print("Compiling with @jit + @kernel...")
 compiled = enigma.compile(elementwise_add, mA, mB, mC)
 
-print(f"\nGenerated Metal source:")
+print("\nGenerated Metal source:")
 print("=" * 60)
 print(compiled.metal_source)
 print("=" * 60)
@@ -65,8 +68,11 @@ B = np.random.randn(M, N).astype(np.float32)
 
 runtime = enigma.MetalRuntime()
 result_bytes = runtime.execute(
-    compiled, inputs=[A.ravel(), B.ravel()], output_size=M * N * 4,
-    grid=compiled.grid, threads=compiled.block,
+    compiled,
+    inputs=[A.ravel(), B.ravel()],
+    output_size=M * N * 4,
+    grid=compiled.grid,
+    threads=compiled.block,
 )
 
 result = np.frombuffer(result_bytes, dtype=np.float32).reshape(M, N)

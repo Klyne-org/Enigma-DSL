@@ -1,1 +1,1 @@
-from .runtime import MetalRuntime
+from .runtime import MetalRuntime as MetalRuntime
