@@ -1,6 +1,9 @@
 """Enigma — A Python DSL for Apple Metal GPU kernels."""
 
-from ._version import __version__ as __version__
+try:
+    from ._version import __version__ as __version__
+except ImportError:
+    __version__ = "unknown"
 from .compiler.compiler import CompiledKernel as CompiledKernel, compile as compile
 from .compiler.kernel import jit as jit, kernel as kernel
 from .core import (

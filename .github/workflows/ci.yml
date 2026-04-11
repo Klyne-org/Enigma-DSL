@@ -31,6 +31,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install setuptools && uv pip install -e ".[dev]" --system --no-build-isolation
+        run: uv pip install setuptools --system && uv pip install -e ".[dev]" --system --no-build-isolation
       - name: Test
         run: pytest tests/test_layout_algebra.py -v
