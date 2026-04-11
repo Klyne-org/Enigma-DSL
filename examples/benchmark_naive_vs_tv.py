@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-import sys, os, time
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
+
 import enigma
 from enigma.tensor import Tensor, tensor_composition, tensor_zipped_divide
 
 # --- Naive scalar kernel ---
 
+
 @enigma.kernel
 def vector_add_naive(A: enigma.f32, B: enigma.f32, C: enigma.f32):
     tid = enigma.thread_position_in_grid
     C[tid] = A[tid] + B[tid]
+
 
 naive_compiled = enigma.compile(vector_add_naive)
 
@@ -20,6 +25,7 @@ naive_compiled = enigma.compile(vector_add_naive)
 vec4_compiled = enigma.compile(vector_add_naive, vec_width=4)
 
 # --- TV layout kernel ---
+
 
 @enigma.kernel
 def add_kernel_tv(gA, gB, gC, tv_layout, tiler):
@@ -36,8 +42,10 @@ def add_kernel_tv(gA, gB, gC, tv_layout, tiler):
     thrC = tidfrgC[(tidx, None)]
     thrC.store(thrA.load() + thrB.load())
 
+
 M, N = 1024, 1024
 TOTAL = M * N
+
 
 @enigma.jit
 def elementwise_add_tv(mA, mB, mC):
@@ -50,7 +58,9 @@ def elementwise_add_tv(mA, mB, mC):
     num_blocks = enigma.size(gA, mode=[1])
     threads = enigma.size(tv_layout, mode=[0])
     add_kernel_tv(gA, gB, gC, tv_layout, tiler_mn).launch(
-        grid=(num_blocks * threads, 1, 1), block=(threads, 1, 1))
+        grid=(num_blocks * threads, 1, 1), block=(threads, 1, 1)
+    )
+
 
 mA = Tensor("A", 0, "float", enigma.Layout((M, N), (N, 1)))
 mB = Tensor("B", 1, "float", enigma.Layout((M, N), (N, 1)))
@@ -72,29 +82,36 @@ expected = A_np + B_np
 runtime = enigma.MetalRuntime()
 
 naive_out = np.frombuffer(
-    runtime.execute(naive_compiled, [A_np, B_np], TOTAL * 4,
-                    grid=(TOTAL, 1, 1), threads=(256, 1, 1)),
-    dtype=np.float32)
+    runtime.execute(
+        naive_compiled, [A_np, B_np], TOTAL * 4, grid=(TOTAL, 1, 1), threads=(256, 1, 1)
+    ),
+    dtype=np.float32,
+)
 np.testing.assert_allclose(naive_out, expected, rtol=1e-5)
 print("Naive:    correct")
 
 vec4_out = np.frombuffer(
-    runtime.execute(vec4_compiled, [A_np, B_np], TOTAL * 4,
-                    grid=(TOTAL // 4, 1, 1), threads=(256, 1, 1)),
-    dtype=np.float32)
+    runtime.execute(
+        vec4_compiled, [A_np, B_np], TOTAL * 4, grid=(TOTAL // 4, 1, 1), threads=(256, 1, 1)
+    ),
+    dtype=np.float32,
+)
 np.testing.assert_allclose(vec4_out, expected, rtol=1e-5)
 print("float4:   correct")
 
 tv_out = np.frombuffer(
-    runtime.execute(tv_compiled, [A_np, B_np], TOTAL * 4,
-                    grid=tv_compiled.grid, threads=tv_compiled.block),
-    dtype=np.float32)
+    runtime.execute(
+        tv_compiled, [A_np, B_np], TOTAL * 4, grid=tv_compiled.grid, threads=tv_compiled.block
+    ),
+    dtype=np.float32,
+)
 np.testing.assert_allclose(tv_out, expected, rtol=1e-5)
 print("TV:       correct")
 
 # --- Benchmark ---
 
 WARMUP, ITERS = 10, 100
+
 
 def bench(name, compiled_k, grid, threads):
     prep = runtime.prepare(compiled_k, [A_np, B_np], TOTAL * 4)
@@ -110,13 +127,16 @@ def bench(name, compiled_k, grid, threads):
     print(f"  {name:40s}  {med:8.3f} us  {bw:6.1f} GB/s")
     return med
 
-print(f"\n{'─'*72}")
-t_naive = bench("float  (scalar)", naive_compiled,
-                grid=(TOTAL, 1, 1), threads=(256, 1, 1))
-t_vec4 = bench("float4 (vec)", vec4_compiled,
-               grid=(TOTAL // 4, 1, 1), threads=(256, 1, 1))
-t_tv = bench("TV layout (float4, 16 elem/thread)", tv_compiled,
-             grid=tv_compiled.grid, threads=tv_compiled.block)
-print(f"{'─'*72}")
-print(f"  float4 vs float:  {t_naive/t_vec4:.2f}x")
-print(f"  TV     vs float:  {t_naive/t_tv:.2f}x")
+
+print(f"\n{'─' * 72}")
+t_naive = bench("float  (scalar)", naive_compiled, grid=(TOTAL, 1, 1), threads=(256, 1, 1))
+t_vec4 = bench("float4 (vec)", vec4_compiled, grid=(TOTAL // 4, 1, 1), threads=(256, 1, 1))
+t_tv = bench(
+    "TV layout (float4, 16 elem/thread)",
+    tv_compiled,
+    grid=tv_compiled.grid,
+    threads=tv_compiled.block,
+)
+print(f"{'─' * 72}")
+print(f"  float4 vs float:  {t_naive / t_vec4:.2f}x")
+print(f"  TV     vs float:  {t_naive / t_tv:.2f}x")

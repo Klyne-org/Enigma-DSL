@@ -1,9 +1,10 @@
 """Emit Metal C++ source from traced IR."""
 
 from __future__ import annotations
+
 from typing import List, Set
 
-from .._tracing import KernelBuilder, IROp
+from .._tracing import IROp, KernelBuilder
 
 
 def _metal_vec_type(base_dtype: str, width: int) -> str:
@@ -19,6 +20,7 @@ def _best_vec_width(num_contiguous: int, dtype: str, offset: int = 0) -> int:
 
 def _base_expr(base_offset) -> str:
     from .._tracing import IRValue
+
     return base_offset.name if isinstance(base_offset, IRValue) else str(base_offset)
 
 
@@ -70,8 +72,12 @@ def emit_metal(builder: KernelBuilder, vec_width: int = 0) -> str:
 def _emit_op(op: IROp, lines: List[str], vec_width: int = 0) -> None:
     t = op.op_type
 
-    if t in ("thread_position_in_grid", "thread_position_in_threadgroup",
-             "threadgroup_position_in_grid", "threads_per_threadgroup"):
+    if t in (
+        "thread_position_in_grid",
+        "thread_position_in_threadgroup",
+        "threadgroup_position_in_grid",
+        "threads_per_threadgroup",
+    ):
         return
 
     if t == "const":
@@ -109,17 +115,25 @@ def _emit_op(op: IROp, lines: List[str], vec_width: int = 0) -> None:
             vec_w = _best_vec_width(count, op.attrs["dtype"])
             vtype = _metal_vec_type(op.attrs["dtype"], vec_w)
             for vi in range(count // vec_w):
-                lines.append(f"    {vtype} {res.name}_g{gi}_v{vi} = "
-                             f"{a.name}_g{gi}_v{vi} + {b.name}_g{gi}_v{vi};")
+                lines.append(
+                    f"    {vtype} {res.name}_g{gi}_v{vi} = "
+                    f"{a.name}_g{gi}_v{vi} + {b.name}_g{gi}_v{vi};"
+                )
             for ri in range(count % vec_w):
-                lines.append(f"    {op.attrs['dtype']} {res.name}_g{gi}_s{ri} = "
-                             f"{a.name}_g{gi}_s{ri} + {b.name}_g{gi}_s{ri};")
+                lines.append(
+                    f"    {op.attrs['dtype']} {res.name}_g{gi}_s{ri} = "
+                    f"{a.name}_g{gi}_s{ri} + {b.name}_g{gi}_s{ri};"
+                )
 
 
 def _emit_tv_load(op: IROp, lines: List[str]) -> None:
     buf, base, groups, dtype, res = (
-        op.attrs["buffer"], op.attrs["base_offset"],
-        op.attrs["groups"], op.attrs["dtype"], op.result)
+        op.attrs["buffer"],
+        op.attrs["base_offset"],
+        op.attrs["groups"],
+        op.attrs["dtype"],
+        op.result,
+    )
     base_e = _base_expr(base)
 
     for gi, (start, count) in enumerate(groups):
@@ -128,8 +142,10 @@ def _emit_tv_load(op: IROp, lines: List[str]) -> None:
         for vi in range(count // vec_w):
             off = start + vi * vec_w
             off_expr = f"{base_e} + {off}" if off != 0 else base_e
-            lines.append(f"    {vtype} {res.name}_g{gi}_v{vi} = "
-                         f"*reinterpret_cast<device const {vtype}*>(&{buf}[{off_expr}]);")
+            lines.append(
+                f"    {vtype} {res.name}_g{gi}_v{vi} = "
+                f"*reinterpret_cast<device const {vtype}*>(&{buf}[{off_expr}]);"
+            )
         for ri in range(count % vec_w):
             off = start + (count // vec_w) * vec_w + ri
             off_expr = f"{base_e} + {off}" if off != 0 else base_e
@@ -138,8 +154,12 @@ def _emit_tv_load(op: IROp, lines: List[str]) -> None:
 
 def _emit_tv_store(op: IROp, lines: List[str]) -> None:
     buf, base, groups, dtype, val = (
-        op.attrs["buffer"], op.attrs["base_offset"],
-        op.attrs["groups"], op.attrs["dtype"], op.operands[0])
+        op.attrs["buffer"],
+        op.attrs["base_offset"],
+        op.attrs["groups"],
+        op.attrs["dtype"],
+        op.operands[0],
+    )
     base_e = _base_expr(base)
 
     for gi, (start, count) in enumerate(groups):
@@ -148,8 +168,10 @@ def _emit_tv_store(op: IROp, lines: List[str]) -> None:
         for vi in range(count // vec_w):
             off = start + vi * vec_w
             off_expr = f"{base_e} + {off}" if off != 0 else base_e
-            lines.append(f"    *reinterpret_cast<device {vtype}*>(&{buf}[{off_expr}]) = "
-                         f"{val.name}_g{gi}_v{vi};")
+            lines.append(
+                f"    *reinterpret_cast<device {vtype}*>(&{buf}[{off_expr}]) = "
+                f"{val.name}_g{gi}_v{vi};"
+            )
         for ri in range(count % vec_w):
             off = start + (count // vec_w) * vec_w + ri
             off_expr = f"{base_e} + {off}" if off != 0 else base_e

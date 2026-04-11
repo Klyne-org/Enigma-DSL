@@ -1,20 +1,35 @@
-import sys, os, unittest
+import os
+import sys
+import unittest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from enigma.tuple import (
-    rank, depth, flatten, product,
-    crd2idx, idx2crd, compact_col_major, compact_order,
-    select, elem_scale, is_congruent, is_compatible,
-)
 from enigma.core import (
-    Layout, make_ordered_layout,
-    coalesce, complement, recast_layout,
-    zipped_divide, make_layout_tv,
+    Layout,
+    coalesce,
+    complement,
+    make_layout_tv,
+    make_ordered_layout,
+    recast_layout,
+    zipped_divide,
+)
+from enigma.tuple import (
+    compact_col_major,
+    compact_order,
+    crd2idx,
+    depth,
+    elem_scale,
+    flatten,
+    idx2crd,
+    is_compatible,
+    is_congruent,
+    product,
+    rank,
+    select,
 )
 
 
 class TestTuple(unittest.TestCase):
-
     def test_rank(self):
         self.assertEqual(rank(8), 1)
         self.assertEqual(rank((4, 8)), 2)
@@ -61,7 +76,6 @@ class TestTuple(unittest.TestCase):
 
 
 class TestLayout(unittest.TestCase):
-
     def test_basic(self):
         L = Layout((4, 8), (1, 4))
         self.assertEqual(L((0, 0)), 0)
@@ -99,7 +113,6 @@ class TestLayout(unittest.TestCase):
 
 
 class TestTVLayout(unittest.TestCase):
-
     def test_make_layout_tv(self):
         thr = make_ordered_layout((4, 64), order=(1, 0))
         val = Layout((16, 8), (8, 1))

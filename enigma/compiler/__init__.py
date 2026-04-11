@@ -1,2 +1,2 @@
-from .kernel import kernel
-from .compiler import compile
+from .compiler import compile as compile
+from .kernel import kernel as kernel

@@ -14,6 +14,7 @@ _jit_local = threading.local()
 
 class _JitContext:
     """Captures kernel trace + launch config from a @jit run."""
+
     def __init__(self):
         self.builder: Optional[KernelBuilder] = None
         self.grid: Optional[Tuple[int, ...]] = None
@@ -52,6 +53,7 @@ def kernel(fn: Callable) -> KernelDef:
 
 class JitDef:
     """A host-side JIT function that does layout algebra + launches kernels."""
+
     def __init__(self, fn: Callable):
         self.fn = fn
         self.name = fn.__name__

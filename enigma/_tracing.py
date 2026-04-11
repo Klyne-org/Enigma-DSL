@@ -16,6 +16,7 @@ def get_builder() -> Optional[KernelBuilder]:
 @dataclass
 class IRValue:
     """An SSA value produced during tracing."""
+
     name: str
     dtype: str
     _tv_groups: Any = field(default=None, repr=False)
@@ -23,9 +24,11 @@ class IRValue:
     def __add__(self, other) -> IRValue:
         if isinstance(other, int) and other == 0:
             return self
-        if (isinstance(other, IRValue)
-                and self._tv_groups is not None
-                and other._tv_groups is not None):
+        if (
+            isinstance(other, IRValue)
+            and self._tv_groups is not None
+            and other._tv_groups is not None
+        ):
             return _tv_binop("tv_add", self, other)
         return _binop("add", self, other)
 
@@ -93,9 +96,17 @@ def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
     assert builder is not None
     result = builder.new_value(lhs.dtype)
     result._tv_groups = lhs._tv_groups
-    builder.record(IROp(op_type, result, [lhs, rhs], attrs={
-        "groups": lhs._tv_groups, "dtype": lhs.dtype,
-    }))
+    builder.record(
+        IROp(
+            op_type,
+            result,
+            [lhs, rhs],
+            attrs={
+                "groups": lhs._tv_groups,
+                "dtype": lhs.dtype,
+            },
+        )
+    )
     return result
 
 
@@ -119,15 +130,27 @@ class TracingTensor:
         builder = get_builder()
         assert builder is not None
         result = builder.new_value(self.metal_dtype)
-        builder.record(IROp("load", result, [index],
-                            attrs={"buffer": self.name, "buffer_index": self.buffer_index}))
+        builder.record(
+            IROp(
+                "load",
+                result,
+                [index],
+                attrs={"buffer": self.name, "buffer_index": self.buffer_index},
+            )
+        )
         return result
 
     def __setitem__(self, index: IRValue, value: IRValue) -> None:
         builder = get_builder()
         assert builder is not None
-        builder.record(IROp("store", None, [index, value],
-                            attrs={"buffer": self.name, "buffer_index": self.buffer_index}))
+        builder.record(
+            IROp(
+                "store",
+                None,
+                [index, value],
+                attrs={"buffer": self.name, "buffer_index": self.buffer_index},
+            )
+        )
 
 
 class KernelBuilder:

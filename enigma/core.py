@@ -9,10 +9,22 @@ from __future__ import annotations
 from typing import Tuple
 
 from .tuple import (
-    Coord, Shape, Stride,
-    ceil_div, compact_col_major, compact_order, crd2idx, depth, elem_scale,
-    flatten, gcd, idx2crd, inner_product, is_int, is_tuple, product,
-    rank as _tuple_rank, select, shape_div,
+    Coord,
+    Shape,
+    Stride,
+    ceil_div,
+    compact_col_major,
+    compact_order,
+    crd2idx,
+    depth,
+    flatten,
+    gcd,
+    is_int,
+    is_tuple,
+    product,
+)
+from .tuple import (
+    rank as _tuple_rank,
 )
 
 
@@ -73,6 +85,7 @@ def _fmt(x):
 
 # --- Constructors ---
 
+
 def make_layout(shape: Shape, stride: Stride = None) -> Layout:
     return Layout(shape, stride)
 
@@ -87,6 +100,7 @@ def make_identity_layout(shape: Shape) -> Layout:
 
 
 # --- Queries ---
+
 
 def size(x, mode=None) -> int:
     """Size of a layout, tensor, or shape."""
@@ -109,6 +123,7 @@ def cosize(x: Layout) -> int:
 
 
 # --- Coalesce ---
+
 
 def coalesce(layout: Layout) -> Layout:
     """Flatten and merge adjacent modes with compatible strides."""
@@ -137,6 +152,7 @@ def coalesce(layout: Layout) -> Layout:
 
 
 # --- Complement ---
+
 
 def complement(layout: Layout, cosize_val: int = None) -> Layout:
     """Complementary layout covering elements not in layout's image."""
@@ -170,6 +186,7 @@ def complement(layout: Layout, cosize_val: int = None) -> Layout:
 
 
 # --- Composition ---
+
 
 def composition(a, b) -> Layout:
     """Compose layouts: (a . b)(c) = a(b(c))."""
@@ -244,6 +261,7 @@ def _compose_impl(a: Layout, b_shape: Shape, b_stride: Stride):
 
 # --- Inverses ---
 
+
 def right_inverse(layout: Layout) -> Layout:
     """Right inverse: offsets -> coordinates."""
     coal = coalesce(layout)
@@ -265,6 +283,7 @@ def left_inverse(layout: Layout) -> Layout:
 
 
 # --- Divide ---
+
 
 def logical_divide(layout: Layout, tiler) -> Layout:
     """Split layout into (tile, rest)."""
@@ -303,6 +322,7 @@ def zipped_divide(layout: Layout, tiler) -> Layout:
 
 # --- Product ---
 
+
 def blocked_product(a: Layout, b: Layout) -> Layout:
     """Blocked product: each element of b gets a full copy of a."""
     a_s, a_d = flatten(a.shape), flatten(a.stride)
@@ -315,6 +335,7 @@ def blocked_product(a: Layout, b: Layout) -> Layout:
 
 
 # --- Recast ---
+
 
 def recast_layout(new_bits: int, old_bits: int, layout: Layout) -> Layout:
     """Rescale layout for different element bit-width."""
@@ -334,14 +355,21 @@ def recast_layout(new_bits: int, old_bits: int, layout: Layout) -> Layout:
 
 def _rebuild_hierarchy(ref_shape: Shape, flat_s: list, flat_d: list) -> Layout:
     idx = [0]
+
     def _build_s(ref):
         if is_int(ref):
-            v = flat_s[idx[0]]; idx[0] += 1; return v
+            v = flat_s[idx[0]]
+            idx[0] += 1
+            return v
         return tuple(_build_s(r) for r in ref)
+
     def _build_d(ref):
         if is_int(ref):
-            v = flat_d[idx2[0]]; idx2[0] += 1; return v
+            v = flat_d[idx2[0]]
+            idx2[0] += 1
+            return v
         return tuple(_build_d(r) for r in ref)
+
     new_shape = _build_s(ref_shape)
     idx2 = [0]
     new_stride = _build_d(ref_shape)
@@ -349,6 +377,7 @@ def _rebuild_hierarchy(ref_shape: Shape, flat_s: list, flat_d: list) -> Layout:
 
 
 # --- TV Layout ---
+
 
 def make_layout_tv(thr_layout: Layout, val_layout: Layout) -> Tuple[Shape, Layout]:
     """Construct Thread-Value layout from thread and value layouts.
@@ -382,8 +411,7 @@ def make_layout_tv(thr_layout: Layout, val_layout: Layout) -> Tuple[Shape, Layou
 
     tv_thr_shape = tuple(thr_s[thr_inv[k]] for k in range(n_modes))
     tv_thr_stride = tuple(
-        product(val_s[thr_inv[k]]) * tile_mode_strides[thr_inv[k]]
-        for k in range(n_modes)
+        product(val_s[thr_inv[k]]) * tile_mode_strides[thr_inv[k]] for k in range(n_modes)
     )
     tv_val_shape = tuple(val_s[val_inv[k]] for k in range(n_modes))
     tv_val_stride = tuple(tile_mode_strides[val_inv[k]] for k in range(n_modes))

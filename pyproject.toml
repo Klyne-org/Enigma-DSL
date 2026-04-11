@@ -1,17 +1,28 @@
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "enigma"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Python DSL for Apple Metal GPU kernels"
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.setuptools_scm]
+write_to = "enigma/_version.py"
 
 [tool.setuptools.packages.find]
 include = ["enigma*"]
