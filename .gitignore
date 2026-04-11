@@ -1,0 +1,19 @@
+# Reference repos (submodules / vendored)
+cutlass/
+gpt-oss-metal-kernels/
+LLAIR/
+
+# Reference documents
+cute_layout.pdf
+metal_cute_lowering.excalidraw
+ENIGMA_DSL_IMPLEMENTATION_PLAN.md
+
+# Build artifacts
+*.dylib
+*.metallib
+*.air
+__pycache__/
+*.egg-info/
+
+# OS files
+.DS_Store
