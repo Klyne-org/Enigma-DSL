@@ -14,4 +14,18 @@ jobs:
           fetch-depth: 0
 
       - name: Check DCO sign-off
-        uses: tim-actions/dco@master
+        run: |
+          commits=$(git log origin/main..HEAD --format="%H %s")
+          missing=""
+          while IFS= read -r line; do
+            sha=$(echo "$line" | cut -d' ' -f1)
+            if ! git log -1 --format="%B" "$sha" | grep -q "^Signed-off-by:"; then
+              missing="$missing\n  $line"
+            fi
+          done <<< "$commits"
+          if [ -n "$missing" ]; then
+            echo "Missing Signed-off-by in commits:$missing"
+            echo "Run: git commit -s --amend (or rebase with -s)"
+            exit 1
+          fi
+          echo "All commits have DCO sign-off."
