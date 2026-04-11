@@ -15,5 +15,3 @@ jobs:
 
       - name: Check DCO sign-off
         uses: tim-actions/dco@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
