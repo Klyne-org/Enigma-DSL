@@ -53,7 +53,7 @@ public func enigma_load_library_from_data(
     let device = Unmanaged<MTLDevice>.fromOpaque(devicePtr).takeUnretainedValue()
     let dispatchData = DispatchData(
         bytesNoCopy: UnsafeRawBufferPointer(start: data, count: len),
-        deallocator: .custom(nil, { /* no-op: Python owns the buffer */ })
+        deallocator: .custom(nil, { })
     )
     do {
         let library = try device.makeLibrary(data: dispatchData as __DispatchData)

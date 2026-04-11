@@ -7,12 +7,12 @@ from .._tracing import KernelBuilder, IROp
 
 
 def _metal_vec_type(base_dtype: str, width: int) -> str:
-    return f"{base_dtype}{width}"
+    return base_dtype if width <= 1 else f"{base_dtype}{width}"
 
 
-def _best_vec_width(num_contiguous: int, dtype: str) -> int:
+def _best_vec_width(num_contiguous: int, dtype: str, offset: int = 0) -> int:
     for w in (4, 2):
-        if num_contiguous >= w:
+        if num_contiguous >= w and offset % w == 0:
             return w
     return 1
 
@@ -123,7 +123,7 @@ def _emit_tv_load(op: IROp, lines: List[str]) -> None:
     base_e = _base_expr(base)
 
     for gi, (start, count) in enumerate(groups):
-        vec_w = _best_vec_width(count, dtype)
+        vec_w = _best_vec_width(count, dtype, start)
         vtype = _metal_vec_type(dtype, vec_w)
         for vi in range(count // vec_w):
             off = start + vi * vec_w
@@ -143,7 +143,7 @@ def _emit_tv_store(op: IROp, lines: List[str]) -> None:
     base_e = _base_expr(base)
 
     for gi, (start, count) in enumerate(groups):
-        vec_w = _best_vec_width(count, dtype)
+        vec_w = _best_vec_width(count, dtype, start)
         vtype = _metal_vec_type(dtype, vec_w)
         for vi in range(count // vec_w):
             off = start + vi * vec_w

@@ -115,6 +115,11 @@ def _emit_and_build(builder, *, dump_ir, keep_metal_source, work_dir, vec_width=
 
 
 def _run_xcrun(cmd: list[str]) -> None:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"Command not found: {cmd[0]}. Ensure Xcode Command Line Tools are installed."
+        )
     if result.returncode != 0:
         raise RuntimeError(f"xcrun failed: {' '.join(cmd)}\n{result.stderr.strip()}")

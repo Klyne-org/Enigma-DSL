@@ -119,6 +119,7 @@ def coalesce(layout: Layout) -> Layout:
     if not pairs:
         return Layout(1, 0)
 
+    # Sort by stride for canonical form (required by complement/composition)
     pairs.sort(key=lambda p: (p[1], p[0]))
     new_s, new_d = [pairs[0][0]], [pairs[0][1]]
 
