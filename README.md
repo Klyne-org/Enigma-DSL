@@ -2,139 +2,22 @@
   <img src="https://cdn8.futura-sciences.com/a1280/images/actu/enigma-mer-baltique.jpeg" width="600" />
 </p>
 
-<h1 align="center">Enigma</h1>
+<h1 align="center"><code>E N I G M A</code></h1>
 
 <p align="center">
-  <em>Decode the GPU. Write Python. Run Metal.</em>
+  <sub>where python meets metal, and layouts become algebra</sub>
 </p>
 
-<p align="center">
-  A CuTe-style Python DSL that compiles to Apple Metal GPU kernels on Apple Silicon.
-</p>
+In 1945, an Enigma machine sank to the floor of the Baltic Sea. For decades it sat there, its rotors locked, its wiring intact, waiting. When divers finally pulled it from the silt, the mechanism still worked. The genius was never in the shell. It was in the rotors, the wiring, the algebra of permutations hidden inside.
 
----
+Enigma DSL is built on the same principle. Inspired by NVIDIA's CuTe DSL, which brought layout algebra and tiling calculus to CUDA, Enigma brings the same mathematical framework to Apple Metal. Where CuTe targets tensor cores and warps on NVIDIA GPUs, Enigma targets simdgroups and threadgroups on Apple Silicon. The layout algebra is the same. The target is different. You write a Python function. Underneath, the algebra computes how threads map to memory, how tiles partition a tensor, how values flow through a simdgroup. The Python traces into an IR. The IR emits Metal C++. The Metal compiles to GPU machine code. Your function runs on Apple Silicon at hardware bandwidth limits. The surface is clean. The machinery is exact.
 
-Like the cipher machine resting on the Baltic seabed — powerful machinery hidden beneath a clean surface — Enigma lets you write high-level Python while generating tight Metal C++ that runs at hardware bandwidth limits on Apple Silicon.
+The compilation pipeline has four stages. A Python kernel function decorated with `@enigma.kernel` is executed with proxy tensors that record every operation into an SSA intermediate representation. The IR captures loads, stores, arithmetic, and thread index decompositions. A Metal emitter walks the IR and produces Metal Shading Language source, choosing between scalar access, float4 vector pointer types, or TV layout vectorized codegen depending on the kernel pattern. The Metal source is compiled through Apple's toolchain, `xcrun metal` to AIR bitcode, then `xcrun metallib` to a Metal library binary. A Swift runtime loaded via ctypes creates the Metal device, command queue, and pipeline state, dispatches the compute kernel, and returns results to Python through unified memory.
 
-```python
-import enigma
+For tiled kernels, the `@enigma.jit` decorator runs host side layout algebra before launching the GPU kernel. The layout algebra is a pure Python implementation of the CuTe tiling calculus adapted for Metal's memory hierarchy. A Layout is a pair of Shape and Stride that defines a function from logical coordinates to memory offsets. The engine provides composition, complement, coalesce, zipped divide, and the make_layout_tv constructor that builds a Thread Value layout mapping thread indices and value indices to tile coordinates with correct coalescing order. The `@jit` function tiles tensors, constructs the TV layout, and calls `@kernel(...).launch(grid, block)` which traces the kernel body with runtime IRValues for block and thread indices. Tensor slicing with IRValues generates offset arithmetic in the IR. Vectorized `.load()` and `.store()` on per thread tensor fragments emit grouped float4 reads and writes. The entire tiling, decomposition, and vectorization strategy is determined by the layout algebra at compile time. Only the final offset arithmetic and memory transactions reach the GPU.
 
-@enigma.kernel
-def vector_add(A: enigma.f32, B: enigma.f32, C: enigma.f32):
-    tid = enigma.thread_position_in_grid
-    C[tid] = A[tid] + B[tid]
+The generated kernels run at the same bandwidth as hand written Metal. On Apple M4, both the DSL generated scalar kernel and the float4 kernel saturate DRAM bandwidth at approximately 100 GB/s for large tensors, matching native Metal benchmarks measured with GPU hardware timestamps.
 
-compiled = enigma.compile(vector_add)
-```
+### Versions
 
-This generates, compiles, and dispatches a Metal compute kernel — no Xcode, no Objective-C, no boilerplate.
-
-## What Enigma does
-
-**You write Python. Enigma generates Metal.**
-
-```
-@enigma.kernel / @enigma.jit
-        |
-   IR tracing (proxy tensors, IRValues)
-        |
-   Metal C++ emission (scalar, float4, TV-layout vectorized)
-        |
-   xcrun metal -> .air -> .metallib
-        |
-   Swift runtime -> MTLDevice -> GPU dispatch
-        |
-   numpy result
-```
-
-## Layout algebra
-
-Enigma implements CuTe-style layout algebra for tiled, vectorized GPU kernels:
-
-```python
-@enigma.kernel
-def add_kernel(gA, gB, gC, tv_layout, tiler):
-    tidx, _, _ = enigma.arch.thread_idx()
-    bidx, _, _ = enigma.arch.block_idx()
-
-    blkA = gA[((None, None), bidx)]
-    tidfrgA = tensor_composition(blkA, tv_layout, tiler)
-    thrA = tidfrgA[(tidx, None)]
-
-    # ...
-    thrC.store(thrA.load() + thrB.load())  # float4 vectorized
-
-@enigma.jit
-def elementwise_add(mA, mB, mC):
-    thr_layout = enigma.make_ordered_layout((4, 64), order=(1, 0))
-    val_layout = enigma.make_ordered_layout((4, 4), order=(1, 0))
-    tiler_mn, tv_layout = enigma.make_layout_tv(thr_layout, val_layout)
-
-    gA = tensor_zipped_divide(mA, tiler_mn)
-    # ...
-    add_kernel(gA, gB, gC, tv_layout, tiler_mn).launch(grid=..., block=...)
-```
-
-The layout algebra (`make_layout`, `zipped_divide`, `composition`, `complement`, `make_layout_tv`) computes tiling and memory access patterns in pure Python. The `@kernel` body is traced with IRValues and emitted as vectorized Metal C++.
-
-## Performance
-
-GPU timestamps on Apple M4, 4096x4096 float32:
-
-```
-float  (scalar)    ~200 us    ~100 GB/s
-float4 (vec)       ~200 us    ~100 GB/s
-```
-
-Generated kernels run at the same bandwidth as hand-written Metal — the DSL adds zero overhead to GPU execution.
-
-## Quick start
-
-```bash
-pip install numpy
-cd Enigma-DSL
-
-# Naive vector add
-python examples/vector_add.py
-
-# TV-layout tiled vector add (@jit + @kernel)
-python examples/vector_add_tv.py
-
-# Benchmark with GPU timestamps
-python examples/benchmark_naive_vs_tv.py
-
-# Tests
-python -m unittest discover tests
-```
-
-Requirements: macOS with Apple Silicon, Xcode command line tools (`xcrun metal`).
-
-## Project structure
-
-```
-enigma/
-    __init__.py             public API
-    tuple.py                hierarchical tuple math
-    core.py                 Layout algebra engine
-    tensor.py               Tensor = ptr + Layout
-    typing.py               f32, f16, bf16, ...
-    _tracing.py             IR: IRValue, KernelBuilder
-    compiler/
-        kernel.py           @kernel, @jit decorators
-        compiler.py          trace -> emit -> xcrun -> .metallib
-        metal_emitter.py    IR -> Metal C++ source
-    runtime_dispatch/
-        runtime.py          MetalRuntime (ctypes -> Swift)
-        swift/
-            libenigma_runtime.swift
-
-Enigma-Dialect/             MLIR dialect (submodule)
-    dialect/include/EnigmaDialect/
-        EnigmaDialect.td
-        EnigmaOps.td        16 thread/sync ops
-        EnigmaTypes.td      address spaces, layout attr
-```
-
-## License
-
-MIT
+**v0.1.0** Initial release. Layout algebra engine with composition, complement, coalesce, zipped divide, recast, and TV layout construction. Tracing IR with SSA values, constant folding, and thread index decomposition. Metal emitter supporting scalar, float4 vector pointer, and TV layout vectorized codegen. Swift runtime with device management, buffer allocation, synchronous dispatch, and GPU timestamp measurement. Dialect TableGen definitions for 16 thread indexing and synchronization ops. 30 passing tests covering layout algebra, GPU execution across multiple sizes, Metal source export, and IR tracing correctness.
