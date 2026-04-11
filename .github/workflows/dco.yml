@@ -15,7 +15,7 @@ jobs:
 
       - name: Check DCO sign-off
         run: |
-          commits=$(git log origin/main..HEAD --format="%H %s")
+          commits=$(git log origin/main..HEAD --no-merges --format="%H %s")
           missing=""
           while IFS= read -r line; do
             sha=$(echo "$line" | cut -d' ' -f1)
