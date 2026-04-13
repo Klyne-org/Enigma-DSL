@@ -1,4 +1,10 @@
-"""Compilation pipeline: trace -> emit Metal -> xcrun metal -> metallib."""
+"""Compilation pipeline: trace -> MLIR (enigma dialect) -> MSL -> metallib.
+
+For traced kernels containing TV-layout ops (tv_load/tv_store/tv_add) that
+have no enigma-dialect representation yet, we fall back to the legacy
+metal_emitter. The fallback is an implementation detail — the public path
+is MLIR.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .kernel import JitDef, KernelDef, _JitContext, trace_kernel
-from .metal_emitter import emit_metal
+from .mlir_emitter import _UnsupportedMLIROp, emit_mlir, emit_msl
 
 
 @dataclass
@@ -19,14 +25,11 @@ class CompiledKernel:
     metallib_path: str
     metallib_bytes: bytes
     metal_source: str
+    mlir_source: Optional[str] = None
     grid: Optional[Tuple[int, ...]] = None
     block: Optional[Tuple[int, ...]] = None
 
     def export_metal(self, path: str = None) -> str:
-        """Write the generated Metal source to a file and return the path.
-
-        If path is None, writes to {kernel_name}.metal in the current directory.
-        """
         if path is None:
             path = f"{self.kernel_name}.metal"
         with open(path, "w") as f:
@@ -35,45 +38,32 @@ class CompiledKernel:
 
 
 def compile(
-    fn, *args, keep_metal_source=False, dump_ir=False, work_dir=None, vec_width=0
+    fn, *args, keep_metal_source=False, dump_ir=False, dump_mlir=False,
+    work_dir=None, vec_width=0,
 ) -> CompiledKernel:
-    """Compile @enigma.kernel (naive) or @enigma.jit (TV layout) to .metallib.
-
-    vec_width: emit buffer pointers as vector types (e.g. 4 -> float4*).
-               Threads = total_elements / vec_width.
-    """
+    """Compile @enigma.kernel (naive) or @enigma.jit (TV layout) to .metallib."""
     if isinstance(fn, JitDef):
         return _compile_jit(
-            fn,
-            args,
-            dump_ir=dump_ir,
-            keep_metal_source=keep_metal_source,
-            work_dir=work_dir,
-            vec_width=vec_width,
+            fn, args, dump_ir=dump_ir, dump_mlir=dump_mlir,
+            keep_metal_source=keep_metal_source, work_dir=work_dir, vec_width=vec_width,
         )
     elif isinstance(fn, KernelDef):
         return _compile_naive(
-            fn,
-            dump_ir=dump_ir,
-            keep_metal_source=keep_metal_source,
-            work_dir=work_dir,
-            vec_width=vec_width,
+            fn, dump_ir=dump_ir, dump_mlir=dump_mlir,
+            keep_metal_source=keep_metal_source, work_dir=work_dir, vec_width=vec_width,
         )
     raise TypeError(f"Expected @enigma.kernel or @enigma.jit, got {type(fn).__name__}")
 
 
-def _compile_naive(kernel_fn, *, dump_ir, keep_metal_source, work_dir, vec_width):
+def _compile_naive(kernel_fn, *, dump_ir, dump_mlir, keep_metal_source, work_dir, vec_width):
     builder = trace_kernel(kernel_fn)
     return _emit_and_build(
-        builder,
-        dump_ir=dump_ir,
-        keep_metal_source=keep_metal_source,
-        work_dir=work_dir,
-        vec_width=vec_width,
+        builder, dump_ir=dump_ir, dump_mlir=dump_mlir,
+        keep_metal_source=keep_metal_source, work_dir=work_dir, vec_width=vec_width,
     )
 
 
-def _compile_jit(jit_fn, tensor_args, *, dump_ir, keep_metal_source, work_dir, vec_width):
+def _compile_jit(jit_fn, tensor_args, *, dump_ir, dump_mlir, keep_metal_source, work_dir, vec_width):
     with _JitContext() as ctx:
         jit_fn.fn(*tensor_args)
     if ctx.builder is None:
@@ -82,19 +72,35 @@ def _compile_jit(jit_fn, tensor_args, *, dump_ir, keep_metal_source, work_dir, v
             f"Call kernel_fn(...).launch(grid=..., block=...) inside it."
         )
     compiled = _emit_and_build(
-        ctx.builder,
-        dump_ir=dump_ir,
-        keep_metal_source=keep_metal_source,
-        work_dir=work_dir,
-        vec_width=vec_width,
+        ctx.builder, dump_ir=dump_ir, dump_mlir=dump_mlir,
+        keep_metal_source=keep_metal_source, work_dir=work_dir, vec_width=vec_width,
     )
     compiled.grid = ctx.grid
     compiled.block = ctx.block
     return compiled
 
 
+def _lower_to_msl(builder, vec_width: int) -> tuple[str, Optional[str]]:
+    """Return (msl_source, mlir_source_or_None).
+
+    Primary path: trace -> MLIR (enigma dialect) -> MSL via dialect translator.
+    Fallback: legacy metal_emitter for tv_* ops and for vec_width > 0, neither
+    of which the enigma dialect models today.
+    """
+    if vec_width > 0:
+        from .metal_emitter import emit_metal
+        return emit_metal(builder, vec_width=vec_width), None
+    try:
+        mlir_text = emit_mlir(builder)
+        msl = emit_msl(builder)
+        return msl, mlir_text
+    except _UnsupportedMLIROp:
+        from .metal_emitter import emit_metal
+        return emit_metal(builder, vec_width=vec_width), None
+
+
 def _emit_and_build(
-    builder, *, dump_ir, keep_metal_source, work_dir, vec_width=0
+    builder, *, dump_ir, keep_metal_source, work_dir, vec_width=0, dump_mlir=False
 ) -> CompiledKernel:
     if dump_ir:
         print(f"=== IR: {builder.kernel_name} ({len(builder.ops)} ops) ===")
@@ -103,7 +109,14 @@ def _emit_and_build(
             operands = ", ".join(getattr(o, "name", str(o)) for o in op.operands)
             print(f"  {res} = {op.op_type}({operands})")
 
-    metal_source = emit_metal(builder, vec_width=vec_width)
+    metal_source, mlir_source = _lower_to_msl(builder, vec_width)
+
+    if dump_mlir:
+        if mlir_source is not None:
+            print(f"=== MLIR (enigma dialect): {builder.kernel_name} ===\n{mlir_source}")
+        else:
+            print(f"=== MLIR: {builder.kernel_name} — not available (TV-layout fallback) ===")
+
     if dump_ir:
         print(f"=== Metal ===\n{metal_source}")
 
@@ -133,6 +146,7 @@ def _emit_and_build(
         metallib_path=metallib_path,
         metallib_bytes=metallib_bytes,
         metal_source=metal_source,
+        mlir_source=mlir_source,
     )
 
 
