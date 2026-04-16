@@ -1,10 +1,4 @@
-"""Compilation pipeline: trace -> MLIR (enigma dialect) -> MSL -> metallib.
-
-For traced kernels containing TV-layout ops (tv_load/tv_store/tv_add) that
-have no enigma-dialect representation yet, we fall back to the legacy
-metal_emitter. The fallback is an implementation detail — the public path
-is MLIR.
-"""
+"""Compilation pipeline: trace -> MLIR (enigma dialect) -> MSL -> metallib."""
 
 from __future__ import annotations
 
@@ -16,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .kernel import JitDef, KernelDef, _JitContext, trace_kernel
-from .mlir_emitter import _UnsupportedMLIROp, emit_mlir, emit_msl
+from .mlir_emitter import emit_mlir, emit_msl
 
 
 @dataclass
@@ -81,22 +75,13 @@ def _compile_jit(jit_fn, tensor_args, *, dump_ir, dump_mlir, keep_metal_source, 
 
 
 def _lower_to_msl(builder, vec_width: int) -> tuple[str, Optional[str]]:
-    """Return (msl_source, mlir_source_or_None).
+    """Return (msl_source, mlir_source).
 
-    Primary path: trace -> MLIR (enigma dialect) -> MSL via dialect translator.
-    Fallback: legacy metal_emitter for tv_* ops and for vec_width > 0, neither
-    of which the enigma dialect models today.
+    Single path: trace -> MLIR (enigma dialect) -> MSL via dialect translator.
     """
-    if vec_width > 0:
-        from .metal_emitter import emit_metal
-        return emit_metal(builder, vec_width=vec_width), None
-    try:
-        mlir_text = emit_mlir(builder)
-        msl = emit_msl(builder)
-        return msl, mlir_text
-    except _UnsupportedMLIROp:
-        from .metal_emitter import emit_metal
-        return emit_metal(builder, vec_width=vec_width), None
+    mlir_text = emit_mlir(builder, vec_width=vec_width)
+    msl = emit_msl(builder, vec_width=vec_width)
+    return msl, mlir_text
 
 
 def _emit_and_build(
@@ -112,10 +97,7 @@ def _emit_and_build(
     metal_source, mlir_source = _lower_to_msl(builder, vec_width)
 
     if dump_mlir:
-        if mlir_source is not None:
-            print(f"=== MLIR (enigma dialect): {builder.kernel_name} ===\n{mlir_source}")
-        else:
-            print(f"=== MLIR: {builder.kernel_name} — not available (TV-layout fallback) ===")
+        print(f"=== MLIR (enigma dialect): {builder.kernel_name} ===\n{mlir_source}")
 
     if dump_ir:
         print(f"=== Metal ===\n{metal_source}")

@@ -9,6 +9,19 @@ from typing import Any, Dict, List, Optional, Tuple
 _local = threading.local()
 
 
+class EnigmaError(Exception):
+    """Structured error raised by the DSL tracer / emitter."""
+
+
+def _require_builder(op_name: str) -> "KernelBuilder":
+    builder = get_builder()
+    if builder is None:
+        raise EnigmaError(
+            f"enigma.{op_name} can only be used inside @enigma.kernel / @enigma.jit"
+        )
+    return builder
+
+
 def get_builder() -> Optional[KernelBuilder]:
     return getattr(_local, "builder", None)
 
@@ -252,6 +265,169 @@ def quad_shuffle_xor(value, mask): return _simd_shuffle("quad_shuffle_xor", valu
 def quad_broadcast(value, lane): return _simd_shuffle("quad_broadcast", value, lane)
 
 
+# --- Comparison ops (arith.cmpi / arith.cmpf) ---
+# Result dtype is always "i1" (Metal's `bool`). Integer predicates are signed;
+# Metal int is signed by default. Use u_* variants for unsigned semantics.
+
+def _cmp(op_type: str, a, b) -> IRValue:
+    builder = _require_builder(op_type)
+    a, b = _ensure_ir(a), _ensure_ir(b)
+    result = builder.new_value("i1")
+    builder.record(IROp(op_type, result, [a, b]))
+    return result
+
+def cmp_eq(a, b): return _cmp("cmp_eq", a, b)
+def cmp_ne(a, b): return _cmp("cmp_ne", a, b)
+def cmp_lt(a, b): return _cmp("cmp_lt", a, b)
+def cmp_le(a, b): return _cmp("cmp_le", a, b)
+def cmp_gt(a, b): return _cmp("cmp_gt", a, b)
+def cmp_ge(a, b): return _cmp("cmp_ge", a, b)
+def cmp_ult(a, b): return _cmp("cmp_ult", a, b)
+def cmp_ule(a, b): return _cmp("cmp_ule", a, b)
+def cmp_ugt(a, b): return _cmp("cmp_ugt", a, b)
+def cmp_uge(a, b): return _cmp("cmp_uge", a, b)
+
+
+# --- Grid / thread query ops (x/y/z selector) ---
+# Each returns an IRValue of dtype "uint" carrying the chosen dimension as
+# an attr. The emitter maps to the corresponding dialect op.
+
+_DIM_VALID = ("x", "y", "z")
+
+def _grid_query(op_type: str, dim: str) -> IRValue:
+    builder = _require_builder(op_type)
+    if dim not in _DIM_VALID:
+        raise EnigmaError(f"{op_type}: dim must be 'x'/'y'/'z', got {dim!r}")
+    result = builder.new_value("uint")
+    builder.record(IROp(op_type, result, [], attrs={"dim": dim}))
+    return result
+
+def thread_position_in_grid_xyz(dim: str = "x"):
+    return _grid_query("thread_position_in_grid", dim)
+def thread_position_in_threadgroup(dim: str = "x"):
+    return _grid_query("thread_position_in_threadgroup", dim)
+def threadgroup_position_in_grid(dim: str = "x"):
+    return _grid_query("threadgroup_position_in_grid", dim)
+def threads_per_threadgroup(dim: str = "x"):
+    return _grid_query("threads_per_threadgroup", dim)
+def threads_per_grid(dim: str = "x"):
+    return _grid_query("threads_per_grid", dim)
+def threadgroups_per_grid(dim: str = "x"):
+    return _grid_query("threadgroups_per_grid", dim)
+def grid_size(dim: str = "x"):
+    return _grid_query("grid_size", dim)
+def thread_index_in_threadgroup():
+    return _grid_query("thread_index_in_threadgroup", "x")
+def thread_index_in_simdgroup():
+    return _grid_query("thread_index_in_simdgroup", "x")
+def simdgroup_index_in_threadgroup():
+    return _grid_query("simdgroup_index_in_threadgroup", "x")
+def threads_per_simdgroup():
+    return _grid_query("threads_per_simdgroup", "x")
+def simdgroups_per_threadgroup():
+    return _grid_query("simdgroups_per_threadgroup", "x")
+
+
+# --- Function constants (Metal specialization constants) ---
+# function_constant(dtype, index) produces an IRValue bound to
+# `[[function_constant(index)]]` at pipeline creation time.
+
+def function_constant(dtype: str, index: int) -> IRValue:
+    builder = _require_builder("function_constant")
+    result = builder.new_value(dtype)
+    builder.record(IROp("function_constant", result, [],
+                        attrs={"index": int(index), "dtype": dtype}))
+    return result
+
+
+# --- Regular matrix ops on vector<CxRxT> ---
+# The dialect models MSL matrix types (float4x4 etc) as multi-dim vector types.
+# These ops operate on those types; construction is via IR constants / loads.
+
+def matmul(a: IRValue, b: IRValue, result_dtype: Optional[str] = None) -> IRValue:
+    builder = _require_builder("matmul")
+    result = builder.new_value(result_dtype or a.dtype)
+    builder.record(IROp("matmul", result, [a, b]))
+    return result
+
+def transpose(m: IRValue, result_dtype: Optional[str] = None) -> IRValue:
+    builder = _require_builder("transpose")
+    result = builder.new_value(result_dtype or m.dtype)
+    builder.record(IROp("transpose", result, [m]))
+    return result
+
+def determinant(m: IRValue, scalar_dtype: Optional[str] = None) -> IRValue:
+    builder = _require_builder("determinant")
+    # Determinant returns a scalar; caller usually knows the element dtype.
+    dt = scalar_dtype
+    if dt is None:
+        parsed = parse_vec_dtype(m.dtype)
+        dt = parsed[1] if parsed is not None else m.dtype
+    result = builder.new_value(dt)
+    builder.record(IROp("determinant", result, [m]))
+    return result
+
+
+# --- Simdgroup matrix ops (hardware 8x8 matrix units) ---
+
+def _simdgroup_mat_dtype(elem: str, rows: int = 8, cols: int = 8) -> str:
+    return f"simdgroup_matrix<{rows},{cols},{elem}>"
+
+
+def _parse_simdgroup_mat_dtype(dt: str):
+    """Return (rows, cols, elem) if dt is a simdgroup_matrix dtype, else None."""
+    if not (isinstance(dt, str) and dt.startswith("simdgroup_matrix<") and dt.endswith(">")):
+        return None
+    body = dt[len("simdgroup_matrix<"):-1]
+    parts = body.split(",")
+    return int(parts[0]), int(parts[1]), parts[2].strip()
+
+
+def simdgroup_matrix_load(
+    buf: "TracingTensor", elements_per_row: int, elem: str = "float",
+    rows: int = 8, cols: int = 8,
+) -> IRValue:
+    builder = _require_builder("simdgroup_matrix_load")
+    dt = _simdgroup_mat_dtype(elem, rows, cols)
+    result = builder.new_value(dt)
+    builder.record(IROp("simdgroup_matrix_load", result, [],
+                        attrs={**buf._attrs(), "elements_per_row": int(elements_per_row),
+                               "elem": elem, "rows": rows, "cols": cols}))
+    return result
+
+
+def simdgroup_matrix_store(
+    matrix: IRValue, buf: "TracingTensor", elements_per_row: int,
+) -> None:
+    builder = _require_builder("simdgroup_matrix_store")
+    parsed = _parse_simdgroup_mat_dtype(matrix.dtype)
+    assert parsed is not None, f"Expected simdgroup_matrix dtype, got {matrix.dtype}"
+    builder.record(IROp("simdgroup_matrix_store", None, [matrix],
+                        attrs={**buf._attrs(), "elements_per_row": int(elements_per_row),
+                               "rows": parsed[0], "cols": parsed[1], "elem": parsed[2]}))
+
+
+def simdgroup_multiply_accumulate(
+    a: IRValue, b: IRValue, c: IRValue,
+) -> IRValue:
+    builder = _require_builder("simdgroup_multiply_accumulate")
+    result = builder.new_value(c.dtype)
+    builder.record(IROp("simdgroup_multiply_accumulate", result, [a, b, c]))
+    return result
+
+
+def make_filled_simdgroup_matrix(
+    value: IRValue, elem: str = "float", rows: int = 8, cols: int = 8,
+) -> IRValue:
+    builder = _require_builder("make_filled_simdgroup_matrix")
+    value = _ensure_ir(value)
+    dt = _simdgroup_mat_dtype(elem, rows, cols)
+    result = builder.new_value(dt)
+    builder.record(IROp("make_filled_simdgroup_matrix", result, [value],
+                        attrs={"elem": elem, "rows": rows, "cols": cols}))
+    return result
+
+
 # --- Cast ops ---
 def metal_cast(x, dtype: str) -> IRValue:
     builder = get_builder()
@@ -280,6 +456,193 @@ def simd_barrier(mem_flags: str = "mem_threadgroup") -> None:
     builder = get_builder()
     assert builder is not None
     builder.record(IROp("simdgroup_barrier", None, [], attrs={"mem_flags": mem_flags}))
+
+
+# ============================================================================
+# Vector / SIMD values — float2/3/4, half2/3/4, int2/3/4, uint2/3/4
+# ============================================================================
+# Represented by an IRValue whose dtype is a string of the form
+# "vec<N,elem>" where N in {2,3,4} and elem in {float, half, int, uint}.
+# Elementwise + - * / are inherited from IRValue and lowered to arith ops on
+# the vector MLIR type (MLIR arith supports vector-of-scalar natively).
+
+def _vec_dtype(elem: str, n: int) -> str:
+    return f"vec<{n},{elem}>"
+
+
+def parse_vec_dtype(dt: str):
+    """Return (N, elem) if dt is a vec dtype, else None."""
+    if not (isinstance(dt, str) and dt.startswith("vec<") and dt.endswith(">")):
+        return None
+    body = dt[4:-1]
+    n_s, elem = body.split(",", 1)
+    return int(n_s), elem.strip()
+
+
+def make_vec(*components: IRValue) -> IRValue:
+    """Assemble a vector from 2, 3, or 4 scalars (must have same dtype)."""
+    assert len(components) in (2, 3, 4), "make_vec expects 2, 3, or 4 scalars"
+    builder = get_builder()
+    assert builder is not None
+    components = tuple(_ensure_ir(c) for c in components)
+    elem = components[0].dtype
+    for c in components:
+        assert c.dtype == elem, f"make_vec: mixed dtypes {elem} vs {c.dtype}"
+    result = builder.new_value(_vec_dtype(elem, len(components)))
+    builder.record(IROp("vec_make", result, list(components),
+                        attrs={"elem": elem, "n": len(components)}))
+    return result
+
+
+def vec_extract(v: IRValue, lane: int) -> IRValue:
+    """Extract one scalar element from a vec value."""
+    builder = get_builder()
+    assert builder is not None
+    parsed = parse_vec_dtype(v.dtype)
+    assert parsed is not None, f"vec_extract expects a vec dtype, got {v.dtype}"
+    n, elem = parsed
+    assert 0 <= lane < n
+    result = builder.new_value(elem)
+    builder.record(IROp("vec_extract", result, [v],
+                        attrs={"lane": int(lane), "elem": elem, "n": n}))
+    return result
+
+
+class _VecAccessor:
+    """Descriptor-style .x/.y/.z/.w on IRValue for vec dtypes."""
+    __slots__ = ("_lane",)
+    def __init__(self, lane): self._lane = lane
+    def __get__(self, obj, objtype=None):
+        if obj is None: return self
+        return vec_extract(obj, self._lane)
+
+
+IRValue.x = _VecAccessor(0)
+IRValue.y = _VecAccessor(1)
+IRValue.z = _VecAccessor(2)
+IRValue.w = _VecAccessor(3)
+
+
+def make_float2(x, y): return make_vec(x, y)
+def make_float3(x, y, z): return make_vec(x, y, z)
+def make_float4(x, y, z, w): return make_vec(x, y, z, w)
+
+
+# --- Pack / Unpack (vec <-> packed int) ---
+
+_UNPACK_OPS = {
+    "unpack_snorm4x8_to_float":     ("float", 4),
+    "unpack_unorm4x8_to_float":     ("float", 4),
+    "unpack_snorm2x16_to_float":    ("float", 2),
+    "unpack_unorm2x16_to_float":    ("float", 2),
+    "unpack_srgb_unorm4x8_to_float":("float", 4),
+    "unpack_unorm10a2_to_float":    ("float", 4),
+}
+
+
+def _pack(op_type: str, v: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    result = builder.new_value("uint")
+    builder.record(IROp(op_type, result, [v]))
+    return result
+
+
+def _unpack(op_type: str, x: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    _elem, n = _UNPACK_OPS[op_type]
+    x = _ensure_ir(x)
+    result = builder.new_value(_vec_dtype(_elem, n))
+    builder.record(IROp(op_type, result, [x], attrs={"elem": _elem, "n": n}))
+    return result
+
+
+def pack_float_to_snorm4x8(v): return _pack("pack_float_to_snorm4x8", v)
+def pack_float_to_unorm4x8(v): return _pack("pack_float_to_unorm4x8", v)
+def pack_float_to_snorm2x16(v): return _pack("pack_float_to_snorm2x16", v)
+def pack_float_to_unorm2x16(v): return _pack("pack_float_to_unorm2x16", v)
+def pack_float_to_srgb_unorm4x8(v): return _pack("pack_float_to_srgb_unorm4x8", v)
+def pack_float_to_unorm10a2(v): return _pack("pack_float_to_unorm10a2", v)
+
+def unpack_snorm4x8_to_float(x): return _unpack("unpack_snorm4x8_to_float", x)
+def unpack_unorm4x8_to_float(x): return _unpack("unpack_unorm4x8_to_float", x)
+def unpack_snorm2x16_to_float(x): return _unpack("unpack_snorm2x16_to_float", x)
+def unpack_unorm2x16_to_float(x): return _unpack("unpack_unorm2x16_to_float", x)
+def unpack_srgb_unorm4x8_to_float(x): return _unpack("unpack_srgb_unorm4x8_to_float", x)
+def unpack_unorm10a2_to_float(x): return _unpack("unpack_unorm10a2_to_float", x)
+
+
+# --- Geometry ops ---
+
+def dot(a: IRValue, b: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    parsed = parse_vec_dtype(a.dtype)
+    assert parsed is not None
+    _n, elem = parsed
+    result = builder.new_value(elem)
+    builder.record(IROp("dot", result, [a, b]))
+    return result
+
+
+def length(v: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    parsed = parse_vec_dtype(v.dtype)
+    assert parsed is not None
+    _n, elem = parsed
+    result = builder.new_value(elem)
+    builder.record(IROp("length", result, [v]))
+    return result
+
+
+def distance(a: IRValue, b: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    parsed = parse_vec_dtype(a.dtype)
+    assert parsed is not None
+    _n, elem = parsed
+    result = builder.new_value(elem)
+    builder.record(IROp("distance", result, [a, b]))
+    return result
+
+
+def cross(a: IRValue, b: IRValue) -> IRValue:
+    return _unary("cross", a) if False else _vec_binop("cross", a, b)
+
+
+def normalize(v: IRValue) -> IRValue:
+    return _unary("normalize", v)
+
+
+def reflect(incident: IRValue, normal: IRValue) -> IRValue:
+    return _vec_binop("reflect", incident, normal)
+
+
+def refract(incident: IRValue, normal: IRValue, eta) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    eta = _ensure_ir(eta)
+    result = builder.new_value(incident.dtype)
+    builder.record(IROp("refract", result, [incident, normal, eta]))
+    return result
+
+
+def faceforward(n: IRValue, incident: IRValue, nref: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    result = builder.new_value(n.dtype)
+    builder.record(IROp("faceforward", result, [n, incident, nref]))
+    return result
+
+
+def _vec_binop(op_type: str, a: IRValue, b: IRValue) -> IRValue:
+    builder = get_builder()
+    assert builder is not None
+    result = builder.new_value(a.dtype)
+    builder.record(IROp(op_type, result, [a, b]))
+    return result
 
 def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
     """Binary op on TV-vectorized values, preserving group structure."""
