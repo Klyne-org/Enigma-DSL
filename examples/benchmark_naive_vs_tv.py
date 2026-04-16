@@ -43,7 +43,7 @@ def add_kernel_tv(gA, gB, gC, tv_layout, tiler):
     thrC.store(thrA.load() + thrB.load())
 
 
-M, N = 1024, 1024
+M, N = 4096, 4096
 TOTAL = M * N
 
 
@@ -110,33 +110,51 @@ print("TV:       correct")
 
 # --- Benchmark ---
 
-WARMUP, ITERS = 10, 100
+WARMUP, ITERS = 50, 1000
+
+kernels = [
+    ("float  (scalar)", naive_compiled, (TOTAL, 1, 1), (256, 1, 1)),
+    ("float4 (vec)", vec4_compiled, (TOTAL // 4, 1, 1), (256, 1, 1)),
+    (
+        "TV layout (float4, 16 elem/thread)",
+        tv_compiled,
+        tv_compiled.grid,
+        tv_compiled.block,
+    ),
+]
+
+preps = [(n, runtime.prepare(k, [A_np, B_np], TOTAL * 4), g, t) for n, k, g, t in kernels]
+
+# Global warmup: ramp GPU clocks on every kernel before any timing starts.
+for _ in range(WARMUP):
+    for _, p, g, t in preps:
+        p.dispatch(grid=g, threads=t)
 
 
-def bench(name, compiled_k, grid, threads):
-    prep = runtime.prepare(compiled_k, [A_np, B_np], TOTAL * 4)
-    for _ in range(WARMUP):
-        prep.dispatch(grid=grid, threads=threads)
+def bench(name, prep, grid, threads):
     times = []
     for _ in range(ITERS):
-        gpu_us = prep.dispatch_timed(grid=grid, threads=threads)
-        times.append(gpu_us)
-    prep.release()
-    med = np.median(times)
-    bw = 3 * TOTAL * 4 / (med * 1e-6) / 1e9
-    print(f"  {name:40s}  {med:8.3f} us  {bw:6.1f} GB/s")
-    return med
+        times.append(prep.dispatch_timed(grid=grid, threads=threads))
+    arr = np.asarray(times)
+    mn, med = float(arr.min()), float(np.median(arr))
+    bw_min = 3 * TOTAL * 4 / (mn * 1e-6) / 1e9
+    bw_med = 3 * TOTAL * 4 / (med * 1e-6) / 1e9
+    print(
+        f"  {name:40s}  min {mn:8.2f} us ({bw_min:6.1f} GB/s)   "
+        f"med {med:8.2f} us ({bw_med:6.1f} GB/s)"
+    )
+    return mn
 
 
-print(f"\n{'─' * 72}")
-t_naive = bench("float  (scalar)", naive_compiled, grid=(TOTAL, 1, 1), threads=(256, 1, 1))
-t_vec4 = bench("float4 (vec)", vec4_compiled, grid=(TOTAL // 4, 1, 1), threads=(256, 1, 1))
-t_tv = bench(
-    "TV layout (float4, 16 elem/thread)",
-    tv_compiled,
-    grid=tv_compiled.grid,
-    threads=tv_compiled.block,
-)
-print(f"{'─' * 72}")
+print(f"\n{'─' * 96}")
+results = {n: bench(n, p, g, t) for n, p, g, t in preps}
+print(f"{'─' * 96}")
+
+t_naive = results["float  (scalar)"]
+t_vec4 = results["float4 (vec)"]
+t_tv = results["TV layout (float4, 16 elem/thread)"]
 print(f"  float4 vs float:  {t_naive / t_vec4:.2f}x")
 print(f"  TV     vs float:  {t_naive / t_tv:.2f}x")
+
+for _, p, _, _ in preps:
+    p.release()
