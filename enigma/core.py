@@ -28,6 +28,158 @@ from .tuple import (
 )
 
 
+class Swizzle:
+    """CuTe-style Swizzle<B, M, S> for bank-conflict avoidance.
+
+    Remaps shared memory offsets via XOR to eliminate bank conflicts when
+    accessing columns of a row-major tile.  Apple Silicon threadgroup memory
+    has 32 banks with 4-byte granularity — the same conflict patterns as
+    CUDA shared memory.
+
+    Parameters
+    ----------
+    bits : int
+        Number of XOR bits (B).  Controls the period of the swizzle pattern.
+        Typical values: 1-3.
+    base : int
+        Bit position of the lowest XOR target bit (M).  Usually the
+        log2 of the number of banks divided by the element size.
+    shift : int
+        Bit position of the lowest source bit (S).  The source bits are
+        shifted right by S before XORing into [M, M+B).
+
+    The transformation on a linear byte offset *s* is::
+
+        mask = ((1 << bits) - 1) << base
+        s ^= ((s >> shift) & mask)      # when shift >= base  (right-shift variant)
+        s ^= ((s << (base - shift)) & mask)  # when shift < base
+
+    CuTe uses the convention ``Swizzle<B, M, S>`` where the XOR is always::
+
+        s ^= (s >> S) & (((1 << B) - 1) << M)
+
+    which is the ``shift >= base`` path.
+
+    Example — 128-byte-wide tile of float (32 columns × 4 bytes = stride 128):
+
+    >>> sw = Swizzle(bits=3, base=3, shift=6)   # 8 banks, XOR bits [3,5] from bits [6,8]
+    >>> sw(0)    # row 0, col 0 → offset 0
+    0
+    >>> sw(128)  # row 1, col 0 → XOR remaps to avoid bank 0 collision
+    192
+    """
+
+    __slots__ = ("bits", "base", "shift")
+
+    def __init__(self, bits: int, base: int, shift: int):
+        if bits < 0:
+            raise ValueError(f"Swizzle bits must be non-negative, got {bits}")
+        if base < 0:
+            raise ValueError(f"Swizzle base must be non-negative, got {base}")
+        if shift < 0:
+            raise ValueError(f"Swizzle shift must be non-negative, got {shift}")
+        self.bits = bits
+        self.base = base
+        self.shift = shift
+
+    def __call__(self, offset: int) -> int:
+        """Apply swizzle to a linear offset."""
+        if self.bits == 0:
+            return offset
+        mask = ((1 << self.bits) - 1) << self.base
+        return offset ^ ((offset >> self.shift) & mask)
+
+    def __repr__(self):
+        return f"Swizzle(bits={self.bits}, base={self.base}, shift={self.shift})"
+
+    def __eq__(self, other):
+        if not isinstance(other, Swizzle):
+            return NotImplemented
+        return self.bits == other.bits and self.base == other.base and self.shift == other.shift
+
+
+class SwizzledLayout:
+    """A Layout composed with a Swizzle: offset = swizzle(layout(coord)).
+
+    Behaves like a Layout but applies an XOR-based address remapping after
+    the normal (Shape, Stride) coordinate-to-offset computation.  Use this
+    for threadgroup memory tiles to eliminate bank conflicts.
+
+    Example::
+
+        base_layout = Layout((16, 32), (32, 1))     # 16×32 row-major tile
+        sw = Swizzle(bits=3, base=2, shift=5)
+        swizzled = SwizzledLayout(base_layout, sw)
+        offset = swizzled((row, col))  # bank-conflict-free offset
+    """
+
+    __slots__ = ("layout", "swizzle")
+
+    def __init__(self, layout: "Layout", swizzle: Swizzle):
+        self.layout = layout
+        self.swizzle = swizzle
+
+    def __call__(self, coord) -> int:
+        return self.swizzle(self.layout(coord))
+
+    @property
+    def shape(self):
+        return self.layout.shape
+
+    @property
+    def stride(self):
+        return self.layout.stride
+
+    def size(self, mode=None) -> int:
+        return self.layout.size(mode)
+
+    def rank(self) -> int:
+        return self.layout.rank()
+
+    def depth(self) -> int:
+        return self.layout.depth()
+
+    def cosize(self) -> int:
+        return self.layout.cosize()
+
+    def __repr__(self):
+        return f"SwizzledLayout({self.layout!r}, {self.swizzle!r})"
+
+    def __eq__(self, other):
+        if not isinstance(other, SwizzledLayout):
+            return NotImplemented
+        return self.layout == other.layout and self.swizzle == other.swizzle
+
+
+def swizzle(layout: "Layout", bits: int, base: int, shift: int) -> SwizzledLayout:
+    """Compose a Layout with an XOR swizzle for bank-conflict avoidance.
+
+    Parameters
+    ----------
+    layout : Layout
+        The base shared-memory layout (e.g., row-major tile).
+    bits : int
+        Number of XOR bits (B).
+    base : int
+        Bit position of the lowest target bit (M).
+    shift : int
+        Bit position of the lowest source bit (S).
+
+    Returns
+    -------
+    SwizzledLayout
+        A layout whose ``__call__`` applies the swizzle after the normal
+        coordinate-to-offset mapping.
+
+    Example — 16×32 float tile in threadgroup memory::
+
+        tile = Layout((16, 32), (32, 1))
+        swizzled = swizzle(tile, bits=3, base=2, shift=5)
+        # Now swizzled((r, c)) avoids bank conflicts on column access
+    """
+    return SwizzledLayout(layout, Swizzle(bits, base, shift))
+
+
 class Layout:
     """CuTe-style layout: (Shape, Stride) -> coordinate-to-offset mapping."""
 

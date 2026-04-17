@@ -200,7 +200,35 @@ def tensor_composition(tensor: Tensor, tv_layout: Layout, tiler) -> Tensor:
 
 
 def tensor_zipped_divide(tensor: Tensor, tiler) -> Tensor:
-    """Tile a tensor using zipped_divide."""
+    """Tile a tensor using zipped_divide.
+
+    Raises EnigmaError if the tiler shape exceeds the tensor shape in any
+    dimension — this would produce a zero-element grid and silently return
+    wrong results.
+    """
+    from ._tracing import EnigmaError
+
+    # Normalise shapes to tuples for per-mode comparison
+    t_shape = tensor.layout.shape
+    t_shape_t = t_shape if is_tuple(t_shape) else (t_shape,)
+
+    if isinstance(tiler, (int, tuple)) and not isinstance(tiler, Layout):
+        tiler_shape = tiler if is_tuple(tiler) else (tiler,)
+    elif isinstance(tiler, Layout):
+        tiler_shape = tiler.shape if is_tuple(tiler.shape) else (tiler.shape,)
+    else:
+        tiler_shape = (tiler,)
+
+    for i in range(min(len(t_shape_t), len(tiler_shape))):
+        tensor_dim = product(t_shape_t[i])
+        tiler_dim = product(tiler_shape[i])
+        if tensor_dim < tiler_dim:
+            raise EnigmaError(
+                f"Tiler shape exceeds tensor shape in mode {i}: "
+                f"tensor has {tensor_dim} elements but tiler requires {tiler_dim}. "
+                f"The tile must fit within the tensor in every dimension."
+            )
+
     new_layout = _layout_zipped_divide(tensor.layout, tiler)
     return Tensor(
         tensor.name,

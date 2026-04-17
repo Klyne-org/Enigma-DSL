@@ -57,6 +57,15 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
     from mlir.dialects import arith, memref
     from mlir.dialects import enigma as en
 
+    # Try to import scf; it may not be available if the dialect wheel
+    # doesn't expose the SCF Python bindings yet.
+    try:
+        from mlir.dialects import scf as scf_dialect
+        _has_scf = True
+    except ImportError:
+        scf_dialect = None
+        _has_scf = False
+
     ctx = ir.Context()
     en.register_dialect(ctx)
     ctx.load_all_available_dialects()
@@ -269,7 +278,13 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                     "simdgroups_per_threadgroup": en.SimdgroupsPerThreadgroupOp,
                 }
 
-                for op in builder.ops:
+                def _emit_ops(ops_list):
+                  """Emit a list of traced IR ops into the current MLIR insertion point.
+
+                  This function is recursive: control-flow ops call it for their
+                  nested regions.
+                  """
+                  for op in ops_list:
                     t = op.op_type
 
                     if t in _GRID_QUERY_OPS:
@@ -663,11 +678,76 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         res_ty = m.type.element_type if hasattr(m.type, "element_type") else m.type
                         ssa[op.result.name] = en.DeterminantOp(res_ty, m).result
 
+                    # --- Control flow: scf.for ---
+                    elif t == "scf_for":
+                        if not _has_scf:
+                            raise NotImplementedError(
+                                "Control flow (for_range) requires the SCF dialect. "
+                                "Install a dialect wheel with SCF Python bindings."
+                            )
+                        lo = _to_index(ssa[op.operands[0].name])
+                        hi = _to_index(ssa[op.operands[1].name])
+                        step = _to_index(ssa[op.operands[2].name])
+
+                        for_op = scf_dialect.ForOp(lo, hi, step)
+                        iv_ir = op.attrs["iv"]
+                        ssa[iv_ir.name] = for_op.induction_variable
+
+                        with ir.InsertionPoint(for_op.body):
+                            _emit_ops(op.regions[0])
+                            scf_dialect.YieldOp([])
+
+                    # --- Control flow: scf.if ---
+                    elif t == "scf_if":
+                        if not _has_scf:
+                            raise NotImplementedError(
+                                "Control flow (if_) requires the SCF dialect. "
+                                "Install a dialect wheel with SCF Python bindings."
+                            )
+                        cond = ssa[op.operands[0].name]
+                        has_else = op.attrs.get("has_else", False)
+
+                        if_op = scf_dialect.IfOp(cond, hasElse=has_else)
+
+                        with ir.InsertionPoint(if_op.then_block):
+                            _emit_ops(op.regions[0])
+                            scf_dialect.YieldOp([])
+
+                        if has_else and len(op.regions) > 1:
+                            with ir.InsertionPoint(if_op.else_block):
+                                _emit_ops(op.regions[1])
+                                scf_dialect.YieldOp([])
+
+                    # --- Control flow: scf.while ---
+                    elif t == "scf_while":
+                        if not _has_scf:
+                            raise NotImplementedError(
+                                "Control flow (while_) requires the SCF dialect. "
+                                "Install a dialect wheel with SCF Python bindings."
+                            )
+                        cond_result = op.attrs["cond_result"]
+
+                        while_op = scf_dialect.WhileOp([], [])
+
+                        # "before" region: evaluates the condition
+                        before_block = while_op.before.blocks.append()
+                        with ir.InsertionPoint(before_block):
+                            _emit_ops(op.regions[0])
+                            cond_val = ssa[cond_result.name]
+                            scf_dialect.ConditionOp(cond_val, [])
+
+                        # "after" region: loop body
+                        after_block = while_op.after.blocks.append()
+                        with ir.InsertionPoint(after_block):
+                            _emit_ops(op.regions[1])
+                            scf_dialect.YieldOp([])
+
                     else:
                         raise NotImplementedError(
                             f"No MLIR lowering for traced op {t!r}"
                         )
 
+                _emit_ops(builder.ops)
                 en.ReturnOp()
 
         return module

@@ -8,6 +8,8 @@ from .compiler.compiler import CompiledKernel as CompiledKernel, compile as comp
 from .compiler.kernel import jit as jit, kernel as kernel
 from .core import (
     Layout as Layout,
+    Swizzle as Swizzle,
+    SwizzledLayout as SwizzledLayout,
     blocked_product as blocked_product,
     coalesce as coalesce,
     complement as complement,
@@ -19,6 +21,7 @@ from .core import (
     make_ordered_layout as make_ordered_layout,
     recast_layout as recast_layout,
     size as size,
+    swizzle as swizzle,
     zipped_divide as zipped_divide,
 )
 from .runtime_dispatch.runtime import MetalRuntime as MetalRuntime, PreparedKernel as PreparedKernel
@@ -210,6 +213,10 @@ from ._tracing import (
     simdgroups_per_threadgroup as simdgroups_per_threadgroup,
     # --- Function constants ---
     function_constant as function_constant,
+    # --- Control flow ---
+    for_range as for_range,
+    if_ as if_,
+    while_ as while_,
     # --- Simdgroup matrix ops ---
     simdgroup_matrix_load as simdgroup_matrix_load,
     simdgroup_matrix_store as simdgroup_matrix_store,

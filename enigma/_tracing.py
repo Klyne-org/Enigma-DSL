@@ -670,6 +670,7 @@ class IROp:
     result: Optional[IRValue]
     operands: List[Any] = field(default_factory=list)
     attrs: Dict[str, Any] = field(default_factory=dict)
+    regions: List[List["IROp"]] = field(default_factory=list)
 
 
 class TracingTensor:
@@ -834,7 +835,13 @@ def threadgroup_alloc(dtype: str, size: int) -> "TracingTensor":
 
 
 class KernelBuilder:
-    """Accumulates traced IR operations for one kernel."""
+    """Accumulates traced IR operations for one kernel.
+
+    Supports nested regions for control flow: ``_region_stack`` holds a stack
+    of op-lists.  ``record()`` always appends to the top of the stack.
+    Control-flow context managers push a new list when entering a body and
+    pop it when leaving (attaching it as a region on the parent op).
+    """
 
     def __init__(self, kernel_name: str):
         self.kernel_name = kernel_name
@@ -843,6 +850,9 @@ class KernelBuilder:
         self._counter = 0
         self._tid_value: Optional[IRValue] = None
         self._const_cache: Dict[tuple, IRValue] = {}
+        # Region stack: top element is where record() appends.
+        # Starts with self.ops as the root region.
+        self._region_stack: List[List[IROp]] = [self.ops]
 
     def new_value(self, dtype: str) -> IRValue:
         name = f"_v{self._counter}"
@@ -850,7 +860,18 @@ class KernelBuilder:
         return IRValue(name, dtype)
 
     def record(self, op: IROp) -> None:
-        self.ops.append(op)
+        self._region_stack[-1].append(op)
+
+    def _push_region(self) -> List[IROp]:
+        """Push a new region onto the stack and return it."""
+        region: List[IROp] = []
+        self._region_stack.append(region)
+        return region
+
+    def _pop_region(self) -> List[IROp]:
+        """Pop the current region from the stack and return it."""
+        assert len(self._region_stack) > 1, "Cannot pop root region"
+        return self._region_stack.pop()
 
     def get_thread_position_in_grid(self) -> IRValue:
         if self._tid_value is None:
@@ -895,3 +916,241 @@ class KernelBuilder:
 
     def __exit__(self, *exc):
         _local.builder = None
+
+
+# ============================================================================
+# Control flow — for_range / if_ / while_
+# ============================================================================
+# These trace to structured IR ops with nested regions, which the MLIR
+# emitter lowers to scf.for / scf.if / scf.while.
+
+
+class _ForRangeContext:
+    """Context manager for ``enigma.for_range(lo, hi, step)``.
+
+    Usage::
+
+        with enigma.for_range(0, K, step=1) as i:
+            acc = acc + A[row * K + i] * B[i * N + col]
+
+    The induction variable ``i`` is an ``IRValue`` of dtype ``"int"``
+    (index-typed in MLIR).  The body ops are captured in a region and
+    attached to a ``scf_for`` IROp.
+    """
+
+    def __init__(self, lo, hi, step=1, dtype: str = "int"):
+        self._builder = _require_builder("for_range")
+        self._lo = _ensure_ir(lo) if not isinstance(lo, IRValue) else lo
+        self._hi = _ensure_ir(hi) if not isinstance(hi, IRValue) else hi
+        self._step = _ensure_ir(step) if not isinstance(step, IRValue) else step
+        self._dtype = dtype
+        # The induction variable — available to user code inside the body.
+        self._iv = self._builder.new_value(dtype)
+        self._iv.name = f"_iv{self._builder._counter}"
+
+    def __enter__(self) -> IRValue:
+        self._body = self._builder._push_region()
+        return self._iv
+
+    def __exit__(self, *exc):
+        self._builder._pop_region()
+        op = IROp(
+            "scf_for", None,
+            [self._lo, self._hi, self._step],
+            attrs={"iv": self._iv, "dtype": self._dtype},
+            regions=[self._body],
+        )
+        self._builder.record(op)
+
+
+def for_range(lo, hi, step=1, dtype: str = "int") -> _ForRangeContext:
+    """Trace a ``for`` loop.
+
+    Parameters
+    ----------
+    lo : int or IRValue
+        Loop lower bound (inclusive).
+    hi : int or IRValue
+        Loop upper bound (exclusive).
+    step : int or IRValue
+        Loop step (default 1).
+    dtype : str
+        Type of the induction variable (default ``"int"``).
+
+    Returns a context manager that yields the induction variable::
+
+        with enigma.for_range(0, K) as i:
+            ...
+    """
+    return _ForRangeContext(lo, hi, step, dtype)
+
+
+class _IfContext:
+    """Context manager for ``enigma.if_(condition)``.
+
+    Usage — if-only::
+
+        with enigma.if_(cond):
+            Out[tid] = a
+
+    Usage — if/else::
+
+        with enigma.if_(cond) as (then_block, else_block):
+            with then_block:
+                Out[tid] = a
+            with else_block:
+                Out[tid] = b
+
+    When used without unpacking (no ``as``), the body is the then-branch
+    with no else.  When unpacked into two blocks, each block is a context
+    manager for its region.
+    """
+
+    def __init__(self, condition: IRValue):
+        self._builder = _require_builder("if_")
+        self._condition = _ensure_ir(condition) if not isinstance(condition, IRValue) else condition
+        self._then_body: List[IROp] = []
+        self._else_body: List[IROp] = []
+        self._used_blocks = False
+
+    def __enter__(self):
+        # Return (then_block, else_block) so the user can choose.
+        # If they ignore the return value, we treat the whole `with` body as
+        # the then-branch by pushing a region immediately.
+        self._then_ctx = _RegionBlock(self._builder, self._then_body)
+        self._else_ctx = _RegionBlock(self._builder, self._else_body)
+        # Push the then region immediately — if the user unpacks and uses
+        # the block context managers, they'll push/pop themselves.
+        # We detect the pattern in __exit__: if _then_ctx was never
+        # explicitly entered, we treat the whole body as the then-branch.
+        self._auto_then = self._builder._push_region()
+        return (self._then_ctx, self._else_ctx)
+
+    def __exit__(self, *exc):
+        # If the user used `with enigma.if_(c):` without unpacking blocks,
+        # everything recorded went into self._auto_then.
+        auto_ops = self._builder._pop_region()
+
+        if self._then_ctx._entered:
+            # User used explicit blocks — auto_then should be empty.
+            then_ops = self._then_body
+            else_ops = self._else_body
+        else:
+            # Simple `with enigma.if_(c):` — auto_then is the then-branch.
+            then_ops = auto_ops
+            else_ops = []
+
+        regions = [then_ops]
+        if else_ops:
+            regions.append(else_ops)
+
+        op = IROp(
+            "scf_if", None,
+            [self._condition],
+            attrs={"has_else": bool(else_ops)},
+            regions=regions,
+        )
+        self._builder.record(op)
+
+
+class _RegionBlock:
+    """Helper context manager for an individual then/else block."""
+
+    def __init__(self, builder: KernelBuilder, target: List[IROp]):
+        self._builder = builder
+        self._target = target
+        self._entered = False
+
+    def __enter__(self):
+        self._entered = True
+        self._builder._region_stack.append(self._target)
+        return self
+
+    def __exit__(self, *exc):
+        self._builder._pop_region()
+
+
+def if_(condition) -> _IfContext:
+    """Trace a conditional (if/else).
+
+    Parameters
+    ----------
+    condition : IRValue
+        Boolean condition (i1 dtype).
+
+    Two usage patterns::
+
+        # If-only (no else):
+        with enigma.if_(cond):
+            Out[tid] = a
+
+        # If/else:
+        with enigma.if_(cond) as (then_b, else_b):
+            with then_b:
+                Out[tid] = a
+            with else_b:
+                Out[tid] = b
+    """
+    return _IfContext(condition)
+
+
+class _WhileContext:
+    """Context manager for ``enigma.while_(cond_fn)``.
+
+    Usage::
+
+        def cond():
+            return enigma.cmp_lt(i_val, n)
+
+        with enigma.while_(cond) as loop:
+            # loop body
+            ...
+
+    The condition function is called once at trace time to capture the
+    condition ops into the ``before`` region.  The body of the ``with``
+    block becomes the ``after`` region.
+    """
+
+    def __init__(self, cond_fn):
+        self._builder = _require_builder("while_")
+        self._cond_fn = cond_fn
+        self._before_body: List[IROp] = []
+        self._after_body: List[IROp] = []
+
+    def __enter__(self):
+        # Trace the condition function into the "before" region.
+        self._builder._region_stack.append(self._before_body)
+        self._cond_result = self._cond_fn()
+        self._builder._pop_region()
+
+        # Now push the "after" (body) region for the with-block.
+        self._builder._region_stack.append(self._after_body)
+        return self
+
+    def __exit__(self, *exc):
+        self._builder._pop_region()
+
+        op = IROp(
+            "scf_while", None,
+            [],
+            attrs={"cond_result": self._cond_result},
+            regions=[self._before_body, self._after_body],
+        )
+        self._builder.record(op)
+
+
+def while_(cond_fn) -> _WhileContext:
+    """Trace a ``while`` loop.
+
+    Parameters
+    ----------
+    cond_fn : callable
+        A zero-argument function that, when called, traces the condition
+        ops and returns an ``IRValue`` of dtype ``"i1"`` (boolean).
+
+    Returns a context manager::
+
+        with enigma.while_(lambda: enigma.cmp_lt(i, n)):
+            # body
+    """
+    return _WhileContext(cond_fn)

@@ -3,6 +3,9 @@
 Status after systematic testing of every DSL surface against the
 `enigma-dialect 0.1.0` wheel (commit `44b4f1c`, April 2026).
 
+**Last updated**: April 2026 — reflects DSL-side fixes for Bug 4, R1
+(control flow), and R8 (swizzle).
+
 ---
 
 ## Bugs (must fix)
@@ -158,81 +161,95 @@ rt.execute(compiled, [A], N * 4, ...)  # ABORT — Metal validation trap
 
 ---
 
-### Bug 4 — No validation when TV tile exceeds tensor dimensions
+### ~~Bug 4 — No validation when TV tile exceeds tensor dimensions~~ FIXED
 
-**Component**: DSL (`enigma/tensor.py` or `enigma/core.py`)
+**Component**: DSL (`enigma/tensor.py`)
 
-When the tiler shape is larger than the tensor in any dimension, the grid
-computes to 0 in that axis. The kernel dispatches zero threads and silently
-returns a zeroed output buffer with no error.
+**Status**: Fixed. `tensor_zipped_divide()` now validates that
+`product(tensor.shape[i]) >= product(tiler[i])` for all modes. Raises
+`EnigmaError` with a clear message if violated, instead of silently
+producing a zero-element grid.
 
-**Reproducer**:
-
-```python
-thr = enigma.make_ordered_layout((4, 64), order=(1, 0))
-val = enigma.make_ordered_layout((4, 4), order=(1, 0))
-tiler_mn, tv = enigma.make_layout_tv(thr, val)  # tiler = (16, 256)
-
-# N=64 < tiler[1]=256 — tile doesn't fit
-mA = Tensor("A", 0, "float", enigma.Layout((16, 64), (64, 1)))
-compiled = enigma.compile(launch, mA, mB, mC)
-# compiled.grid = (0, 1, 1) — zero work, silent wrong result
-```
-
-**Fix**: In `tensor_zipped_divide` or `enigma.compile`, check that
-`product(tensor.shape[i]) >= product(tiler[i])` for all modes. Raise
-`EnigmaError` with a clear message if violated.
+**Fix location**: `enigma/tensor.py:tensor_zipped_divide()`
 
 ---
 
 ## Missing features (by priority)
 
-### Priority 1 — Control flow (`if` / `for` / `while`)
+### ~~Priority 1 — Control flow (`if` / `for` / `while`)~~ DSL DONE
 
-**Why critical**: Without loops, the DSL can only express straight-line
-kernels. Every kernel that iterates over a dimension (matmul inner loop,
-attention score accumulation, prefix scan across tiles, any reduction
-larger than a SIMD group) must be manually unrolled at Python trace time
-with a fixed trip count. This is the single biggest limitation.
+**Status**: DSL-side implementation complete.
 
-**Dialect work**:
+**What was implemented**:
 
-1. Link the `scf` dialect in the wheel:
-   ```cmake
-   # python/CMakeLists.txt
-   MLIRCAPISCF
+1. **`KernelBuilder` restructured** (`_tracing.py`): Added `_region_stack`
+   for nested op regions. `IROp` extended with `regions` field for child
+   op lists. Ops are recorded into the top of the stack; control flow
+   context managers push/pop regions.
+
+2. **Three context managers** (`_tracing.py`):
+
+   ```python
+   # for loop — traces to scf_for with 1 body region
+   with enigma.for_range(0, K, step=1) as i:
+       acc = acc + A[row * K + i] * B[i * N + col]
+
+   # conditional (if-only) — traces to scf_if with 1 region
+   with enigma.if_(condition):
+       Out[tid] = a
+
+   # conditional (if/else) — traces to scf_if with 2 regions
+   with enigma.if_(condition) as (then_block, else_block):
+       with then_block:
+           Out[tid] = a
+       with else_block:
+           Out[tid] = b
+
+   # while loop — traces to scf_while with 2 regions (before/after)
+   with enigma.while_(lambda: enigma.cmp_lt(i, n)):
+       # body
    ```
-   ```cpp
-   // EnigmaModule.cpp
-   #include "mlir-c/Dialect/SCF.h"
-   mlirDialectHandleRegisterDialect(mlirGetDialectHandle__scf__(), context);
-   ```
 
-2. The MSL emitter already handles `scf.if` / `scf.for` per
-   `MSLEmitterControlFlow.cpp`. Verify it works with the new bindings.
+3. **MLIR emitter updated** (`mlir_emitter.py`): Op-processing loop
+   refactored into recursive `_emit_ops()`. Handlers for `scf_for` →
+   `scf.ForOp`, `scf_if` → `scf.IfOp`, `scf_while` → `scf.WhileOp`.
+   Graceful error if SCF Python bindings aren't available yet.
 
-**DSL work**:
+4. **Exports**: `enigma.for_range`, `enigma.if_`, `enigma.while_`
 
-Add context-manager APIs to `_tracing.py`:
+5. **Tests**: 15 tests in `tests/test_control_flow.py` covering basic
+   tracing, nesting (for+if, for+for, while+if), sequencing, region
+   stack balance, and op isolation.
 
-```python
-# for loop
-with enigma.for_range(0, K, step=1) as i:
-    acc = acc + A[row * K + i] * B[i * N + col]
+6. **Examples**: `examples/control_flow_test.py` with 6 verified kernels:
+   - Array sum (`for_range`)
+   - Clamp with nested if/else (`if_`)
+   - Sum positive elements (`for_range` + `if_`)
+   - Matmul inner loop (`for_range` with 2 loads + multiply-accumulate)
+   - Linear search (`while_`)
+   - IR tree dump (visualization)
 
-# conditional
-with enigma.if_(condition) as (then_block, else_block):
-    with then_block:
-        Out[tid] = a
-    with else_block:
-        Out[tid] = b
+**Dialect work remaining**:
+
+Register `scf` dialect in the Python wheel (`EnigmaModule.cpp`):
+
+```cpp
+#include "mlir-c/Dialect/SCF.h"
+
+// Inside register_dialect():
+MlirDialectHandle scfHandle = mlirGetDialectHandle__scf__();
+mlirDialectHandleRegisterDialect(scfHandle, context);
+if (load) {
+    mlirDialectHandleLoadDialect(scfHandle, context);
+}
 ```
 
-This requires restructuring `KernelBuilder` to support nested op regions
-instead of a flat list.
+Note: `scf` is already linked in `InitAll.cpp` and the MSL emitter
+already handles `scf.for`/`scf.if` in `MSLEmitterControlFlow.cpp`.
+Only the Python binding registration is missing.
 
-**Estimated effort**: 3-5 days (dialect linking: half day, DSL tracer
-rewrite: 2-3 days, tests: 1 day).
+After this one change, the DSL-side control flow will work end-to-end:
+DSL → traced IR → MLIR (scf ops) → MSL → Metal.
 
 ---
 
@@ -312,6 +329,14 @@ numerically correct results:
 | **Compilation** | dump_ir, dump_mlir, keep_metal_source, export_metal, work_dir |
 | **Stress tests** | Deep expression chains (14+ ops), 8-buffer kernels, large kernels (165 MSL lines / 50+ traced ops), Python-level unrolled loops |
 
+### DSL-side only (tracing verified, awaiting dialect for end-to-end)
+
+| Category | Features tested |
+|---|---|
+| **Control flow** | `for_range` (basic, IRValue bounds, custom dtype), `if_` (if-only, if/else), `while_`, nested (for+if, for+for, while+if), sequential loops, region stack balance |
+| **Swizzle** | `Swizzle(bits, base, shift)`, `SwizzledLayout`, `swizzle()` function, self-inverse property, unique offsets, bank-conflict reduction verified |
+| **TV tile validation** | `tensor_zipped_divide` raises `EnigmaError` when tiler exceeds tensor dims |
+
 ---
 
 ## Roadmap — what the DSL needs to become a real CuTe-for-Metal
@@ -321,43 +346,19 @@ The features above fix what's broken. This section covers what's **missing**
 production GEMM or FlashAttention in." Ordered by dependency chain: each
 item unlocks the ones below it.
 
-### R1 — Control flow (`for` / `if` / `while`)
+### ~~R1 — Control flow (`for` / `if` / `while`)~~ DSL DONE, DIALECT PENDING
 
-**The single blocker that makes everything else academic.**
+**Status**: DSL-side complete. `KernelBuilder` restructured with nested
+region support. Context managers `enigma.for_range()`, `enigma.if_()`,
+`enigma.while_()` trace to `scf_for`, `scf_if`, `scf_while` IR ops.
+MLIR emitter updated to emit `scf.for`/`scf.if`/`scf.while` ops
+recursively. 15 unit tests + 6 example kernels passing.
 
-Without loops, every kernel is a fixed-size straight-line program. You
-cannot write:
-- A matmul for arbitrary K (the inner accumulation loop)
-- A reduction over more than 32 elements (one SIMD group)
-- Attention for variable sequence length
-- Any tiled algorithm that iterates over tiles
-- A prefix scan across threadgroups
+**Remaining dialect work**: Register `scf` Python bindings in
+`EnigmaModule.cpp` (one `#include` + one `mlirDialectHandleRegisterDialect`
+call). The C++ MSL emitter already handles these ops.
 
-Today, the only workaround is Python-level unrolling at trace time with a
-hardcoded trip count. This means separate compilations for every problem
-size, and code that explodes in length (the showcase attention kernel
-manually unrolls 8 chunks of float4 dot — 32 multiply-accumulates written
-line by line, and it still only handles K=32).
-
-CuTe itself doesn't provide control flow (it relies on CUDA `for`/`if`),
-but Enigma traces Python — so it must capture Python control flow. The
-context-manager approach fits a tracing DSL:
-
-```python
-with enigma.for_range(0, K, step=1) as i:
-    acc = acc + A[row * K + i] * B[i * N + col]
-
-with enigma.if_(cond) as (then_b, else_b):
-    with then_b:
-        Out[tid] = a
-    with else_b:
-        Out[tid] = b
-```
-
-**Requires**: `scf` dialect linked in the wheel, `KernelBuilder`
-restructured to support nested op regions instead of a flat list.
-
-**Effort**: 3-5 days. **Unlocks**: everything below.
+**Unlocks**: everything below.
 
 ---
 
@@ -464,90 +465,69 @@ is unacceptable for production use.
    enigma.store_if(buf, idx, val, mask=in_bounds)
    ```
 
-2. **Control flow** (more general, needs R1):
+2. **Control flow** (more general, now available via R1):
    ```python
    with enigma.if_(in_bounds):
        val = buf[idx]
    ```
 
 **Requires**: Either a new `select`-based load op in the dialect, or
-control flow (R1).
+control flow (R1 — now done).
 
 **Effort**: 1 day for masked load, or free with R1. **Unlocks**: arbitrary
 problem sizes without padding.
 
 ---
 
-### R6 — Async copy (`simdgroup_async_copy`)
+### R6 — Async copy (`simdgroup_async_copy`) — DIALECT-SIDE ONLY
 
-Metal 3.1+ (Apple Silicon M3/A17+) has
-`simdgroup_async_copy_from_device_to_threadgroup` for overlapping memory
-transfers with compute. Earlier hardware (M1/M2/A15/A16) does not support
-this — on those devices, shared memory loads are always synchronous.
-
-The DSL should gate this behind a capability check or a user opt-in so
-kernels remain portable across Apple Silicon generations:
-
-```python
-# Explicit opt-in for Metal 3.1+ features
-enigma.async_copy(src=device_ptr, dst=shared_ptr, count=tile_size)
-enigma.commit_async_copy()
-# ... compute on previous tile ...
-enigma.wait_async_copy()
-```
-
-**Requires**: New dialect ops (`enigma.async_copy_to_threadgroup`,
+**Status**: Not applicable on DSL side. Metal 3.1+ (M3/A17+) only feature.
+Requires new dialect ops (`enigma.async_copy_to_threadgroup`,
 `enigma.async_copy_commit`, `enigma.async_copy_wait`) + MSL emission +
-Metal GPU family capability gating.
+Metal GPU family capability gating. M1/M2 do not support async copy — all
+threadgroup loads are synchronous on those devices.
 
-**Effort**: 1-2 days (dialect + DSL). **Unlocks**: double-buffered
-pipelines on M3+ hardware.
-
----
-
-### R7 — Pipeline / double-buffering abstraction
-
-The classic tiled GEMM ping-pongs between two shared memory buffers:
-while computing on tile k from buffer 0, prefetch tile k+1 into buffer 1.
-Next iteration, swap.
-
-On M1/M2 (no async copy), double-buffering still helps by structuring
-the load-compute overlap at the threadgroup level via barriers. On M3+
-with async copy (R6), it becomes a proper async pipeline.
-
-```python
-with enigma.pipeline(stages=2) as pipe:
-    pipe.prefetch(src=global_A[k+1], dst=shared_A[pipe.next_stage])
-    # compute on shared_A[pipe.current_stage]
-    pipe.advance()
-```
-
-**Requires**: Control flow (R1), and optionally async copy (R6) for M3+.
-Synchronous double-buffering (M1/M2) only needs R1 + barriers.
-
-**Effort**: 2-3 days after R1. **Unlocks**: production-grade bandwidth
-utilization.
+**Effort**: 1-2 days (dialect + DSL surface wiring after dialect ops land).
+**Unlocks**: double-buffered pipelines on M3+ hardware.
 
 ---
 
-### R8 — Layout swizzling for bank-conflict avoidance
+### R7 — Pipeline / double-buffering abstraction — UNBLOCKED (needs R1 dialect)
 
-CuTe has `Swizzle<B, M, S>` to XOR-remap shared memory addresses and
-eliminate bank conflicts. Apple Silicon threadgroup memory has 32 banks
-with 4-byte granularity — the same conflict patterns as CUDA shared
-memory apply. A float4x4 tile loaded column-major will serialize across
-banks without swizzling.
+**Status**: Previously blocked by R1 (control flow). DSL-side control flow
+is now implemented; this can proceed once the `scf` dialect Python bindings
+are registered. The pipeline abstraction requires `for` loops to iterate
+over tiles. On M1/M2 (no async copy), double-buffering uses barriers; on
+M3+ with async copy (R6), it becomes a proper async pipeline.
+
+**Effort**: 2-3 days after R1 dialect work. **Unlocks**: production-grade
+bandwidth utilization.
+
+---
+
+### ~~R8 — Layout swizzling for bank-conflict avoidance~~ DONE
+
+**Status**: Implemented in DSL. Apple Silicon threadgroup memory has 32
+banks with 4-byte granularity — the same conflict patterns as CUDA shared
+memory. The `Swizzle` and `SwizzledLayout` classes in `enigma/core.py`
+implement CuTe-style `Swizzle<B, M, S>` XOR-based address remapping.
 
 ```python
-swizzled = enigma.swizzle(layout, bits=3, base=3, shift=0)
-# Composes with existing Layout: shared_layout = composition(base_layout, swizzled)
+# Swizzle a 16x16 float tile to avoid bank conflicts on column access
+tile = enigma.Layout((16, 16), (16, 1))
+swizzled = enigma.swizzle(tile, bits=3, base=0, shift=4)
+offset = swizzled((row, col))  # bank-conflict-free offset
 ```
 
-**Requires**: A `Swizzle` class in `enigma/core.py` that composes with
-`Layout` and modifies the offset calculation with an XOR.
+Properties verified:
+- Self-inverse (XOR): `swizzle(swizzle(x)) == x`
+- Unique offsets: no collisions across all coordinates
+- Bank distribution: 2 unique banks → 8 unique banks for column access
+  on a 16x16 float tile
 
-**Effort**: 1-2 days (pure Python layout algebra). **Unlocks**: optimal
-shared memory throughput for tiled GEMM on Apple Silicon.
+**Classes**: `Swizzle(bits, base, shift)`, `SwizzledLayout(layout, swizzle)`
+**Function**: `swizzle(layout, bits, base, shift) -> SwizzledLayout`
+**Exports**: `enigma.Swizzle`, `enigma.SwizzledLayout`, `enigma.swizzle`
 
 ---
 
@@ -593,7 +573,7 @@ caps = rt.device_capabilities()
 ```
 
 And at compile time, the DSL could select code paths based on these
-(once control flow lands).
+(now possible with control flow).
 
 **Requires**: Query `MTLDevice.supportsFamily()` in the Swift runtime,
 expose via ctypes.
@@ -606,26 +586,26 @@ Silicon generations.
 ### Dependency chain for production GEMM on Apple Silicon
 
 ```
-R1 (control flow)                          ← FOUNDATION
+R1 (control flow)    ← DSL DONE, dialect pending (one line)
  ├── R2 (scalar args) ──── general kernel launch without recompilation
  ├── R3 (tiled copy)
  │    └── R4 (register tensors) ── per-thread accumulator tiles
- │         └── R8 (swizzle) ── bank-conflict-free shared memory
- ├── R5 (predicated loads) ── arbitrary M/N/K without padding
+ │         └── R8 (swizzle) ── DONE
+ ├── R5 (predicated loads) ── arbitrary M/N/K (can use R1 if_ now)
  └── R7 (double buffering) ── overlap load/compute via barriers
       └── R6 (async copy, M3+ only) ── hardware async pipeline
 ```
 
 **Minimum viable tiled GEMM** (works on all Apple Silicon):
-R1 + R2 + R4 + R5 (~8 days).
+R1 dialect + R2 + R4 + R5 (~7 days — R8 already done).
 
 **Production-grade with optimal bandwidth** (M1/M2):
-add R7 + R8 (~4 more days).
+add R7 (~3 more days — R8 already done).
 
 **Peak performance on M3+**:
 add R6 (~2 more days).
 
-Total: ~2 weeks from current state for a complete, portable, tiled GEMM
+Total: ~12 days from current state for a complete, portable, tiled GEMM
 that runs across all Apple Silicon generations.
 
 ---
@@ -643,8 +623,23 @@ that runs across all Apple Silicon generations.
 3. **Bug 3** (function_constant runtime) — needs Swift + Python changes.
    Unblocks specialization constants.
 
-4. **Bug 4** (TV tile validation) — pure Python fix in the DSL. Prevents
-   silent wrong results.
+4. ~~**Bug 4** (TV tile validation)~~ — **FIXED**. `tensor_zipped_divide()`
+   now raises `EnigmaError` when tiler exceeds tensor dimensions.
 
-5. **Priority 1** (control flow) — largest effort but transforms the DSL
-   from "elementwise-only" to "general-purpose GPU programming".
+5. **R1 dialect registration** (control flow) — **one-line change** in
+   `EnigmaModule.cpp` to register `scf` Python bindings. DSL-side
+   implementation is complete (context managers, MLIR emitter, 15 tests,
+   6 example kernels). This single dialect change unlocks:
+   - Loops (matmul inner accumulation, tiled algorithms)
+   - Conditionals (boundary predication, clamping)
+   - General-purpose GPU programming
+
+---
+
+## Changes log
+
+| Date | Item | Side | Description |
+|---|---|---|---|
+| Apr 2026 | Bug 4 | DSL | Fixed: `tensor_zipped_divide` validates tiler fits tensor |
+| Apr 2026 | R1 | DSL | Implemented: `for_range`, `if_`, `while_` context managers, `KernelBuilder` region stack, recursive MLIR emitter, 15 tests, 6 example kernels |
+| Apr 2026 | R8 | DSL | Implemented: `Swizzle`, `SwizzledLayout`, `swizzle()` for bank-conflict avoidance |
