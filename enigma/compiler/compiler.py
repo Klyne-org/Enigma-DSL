@@ -22,6 +22,9 @@ class CompiledKernel:
     mlir_source: Optional[str] = None
     grid: Optional[Tuple[int, ...]] = None
     block: Optional[Tuple[int, ...]] = None
+    # (name, buffer_index, metal_dtype) for each Scalar-annotated param.
+    # The runtime packs a Python value into a 1-element buffer per entry.
+    scalar_params: list = None  # type: ignore[assignment]
 
     def export_metal(self, path: str = None) -> str:
         if path is None:
@@ -129,6 +132,7 @@ def _emit_and_build(
         metallib_bytes=metallib_bytes,
         metal_source=metal_source,
         mlir_source=mlir_source,
+        scalar_params=getattr(builder, "scalar_params", []) or [],
     )
 
 

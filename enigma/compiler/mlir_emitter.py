@@ -296,8 +296,18 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         ssa[op.result.name] = v
 
                     elif t == "const":
-                        val = int(op.attrs["value"])
-                        c = arith.ConstantOp(i32, ir.IntegerAttr.get(i32, val)).result
+                        dt = op.attrs.get("dtype", "int")
+                        raw = op.attrs["value"]
+                        if dt in ("float", "f32"):
+                            f = ir.F32Type.get()
+                            c = arith.ConstantOp(f, ir.FloatAttr.get(f, float(raw))).result
+                        elif dt in ("half", "f16"):
+                            f = ir.F16Type.get()
+                            c = arith.ConstantOp(f, ir.FloatAttr.get(f, float(raw))).result
+                        elif dt == "i1":
+                            c = arith.ConstantOp(i1, ir.IntegerAttr.get(i1, int(raw))).result
+                        else:
+                            c = arith.ConstantOp(i32, ir.IntegerAttr.get(i32, int(raw))).result
                         ssa[op.result.name] = c
 
                     elif t == "load":
@@ -689,13 +699,32 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         hi = _to_index(ssa[op.operands[1].name])
                         step = _to_index(ssa[op.operands[2].name])
 
-                        for_op = scf_dialect.ForOp(lo, hi, step)
+                        iter_args_ir = op.attrs.get("iter_args", [])
+                        yield_vals_ir = op.attrs.get("yield_vals", [])
+                        results_ir = op.attrs.get("results", [])
+                        init_operands = [
+                            ssa[o.name] for o in op.operands[3:]
+                        ]
+
+                        for_op = scf_dialect.ForOp(
+                            lo, hi, step,
+                            iter_args=init_operands if init_operands else None,
+                        )
                         iv_ir = op.attrs["iv"]
                         ssa[iv_ir.name] = for_op.induction_variable
 
+                        # Bind iter_arg names (body-local SSA) before emitting body.
+                        for ia_ir, ia_val in zip(iter_args_ir, for_op.inner_iter_args):
+                            ssa[ia_ir.name] = ia_val
+
                         with ir.InsertionPoint(for_op.body):
                             _emit_ops(op.regions[0])
-                            scf_dialect.YieldOp([])
+                            yield_operands = [ssa[v.name] for v in yield_vals_ir]
+                            scf_dialect.YieldOp(yield_operands)
+
+                        # Bind loop results (for use after the loop).
+                        for res_ir, res_val in zip(results_ir, for_op.results):
+                            ssa[res_ir.name] = res_val
 
                     # --- Control flow: scf.if ---
                     elif t == "scf_if":
@@ -707,7 +736,7 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         cond = ssa[op.operands[0].name]
                         has_else = op.attrs.get("has_else", False)
 
-                        if_op = scf_dialect.IfOp(cond, hasElse=has_else)
+                        if_op = scf_dialect.IfOp(cond, has_else=has_else)
 
                         with ir.InsertionPoint(if_op.then_block):
                             _emit_ops(op.regions[0])

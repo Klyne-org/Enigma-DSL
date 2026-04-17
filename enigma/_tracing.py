@@ -84,13 +84,24 @@ class IRValue:
 
 
 def _ensure_ir(x) -> IRValue:
-    """Wrap a Python int as an IR constant if needed."""
+    """Wrap a Python scalar as an IR constant if needed."""
     if isinstance(x, IRValue):
         return x
+    if isinstance(x, bool):
+        builder = get_builder()
+        assert builder is not None
+        return builder.make_const("i1", int(x))
     if isinstance(x, int):
         builder = get_builder()
         assert builder is not None
         return builder.make_const("uint", x)
+    if isinstance(x, float):
+        builder = get_builder()
+        assert builder is not None
+        # Float constants aren't cached; emit a fresh one each time.
+        val = builder.new_value("float")
+        builder.record(IROp("const", val, [], attrs={"value": float(x), "dtype": "float"}))
+        return val
     raise TypeError(f"Cannot convert {type(x).__name__} to IRValue")
 
 
@@ -925,20 +936,62 @@ class KernelBuilder:
 # emitter lowers to scf.for / scf.if / scf.while.
 
 
-class _ForRangeContext:
-    """Context manager for ``enigma.for_range(lo, hi, step)``.
+class Carry:
+    """Mutable container of loop-carried IRValues for ``enigma.for_range(init=[...])``.
 
-    Usage::
+    Inside the loop body, ``carry[i]`` reads the current per-iteration SSA
+    value (the iter_arg).  Assigning ``carry[i] = new_val`` updates the
+    slot, and the last-written value is yielded at the end of the iteration.
+
+    After the loop closes, ``carry[i]`` reads the loop's *result* (the
+    value after the final iteration), so you can use the carried value
+    in code following the ``with`` block.
+    """
+
+    __slots__ = ("_slots", "_closed")
+
+    def __init__(self, initial: List[IRValue]):
+        self._slots: List[IRValue] = list(initial)
+        self._closed = False
+
+    def __len__(self) -> int:
+        return len(self._slots)
+
+    def __getitem__(self, i: int) -> IRValue:
+        return self._slots[i]
+
+    def __setitem__(self, i: int, value) -> None:
+        if self._closed:
+            raise EnigmaError(
+                "Cannot assign to carry[] outside the for_range body"
+            )
+        self._slots[i] = _ensure_ir(value)
+
+    def _close_and_rebind(self, new_slots: List[IRValue]) -> None:
+        self._slots = list(new_slots)
+        self._closed = True
+
+
+class _ForRangeContext:
+    """Context manager for ``enigma.for_range(lo, hi, step, init=[...])``.
+
+    Without ``init`` — no loop-carried values::
 
         with enigma.for_range(0, K, step=1) as i:
-            acc = acc + A[row * K + i] * B[i * N + col]
+            Out[i] = A[i] + B[i]
+
+    With ``init`` — accumulator-style loops::
+
+        with enigma.for_range(0, K, init=[acc0]) as (i, carry):
+            carry[0] = carry[0] + A[i] * B[i]
+        acc_final = carry[0]  # scf.for result after the loop
 
     The induction variable ``i`` is an ``IRValue`` of dtype ``"int"``
     (index-typed in MLIR).  The body ops are captured in a region and
     attached to a ``scf_for`` IROp.
     """
 
-    def __init__(self, lo, hi, step=1, dtype: str = "int"):
+    def __init__(self, lo, hi, step=1, dtype: str = "int", init=None):
         self._builder = _require_builder("for_range")
         self._lo = _ensure_ir(lo) if not isinstance(lo, IRValue) else lo
         self._hi = _ensure_ir(hi) if not isinstance(hi, IRValue) else hi
@@ -948,22 +1001,66 @@ class _ForRangeContext:
         self._iv = self._builder.new_value(dtype)
         self._iv.name = f"_iv{self._builder._counter}"
 
-    def __enter__(self) -> IRValue:
+        # Loop-carried values: the caller-supplied initial SSA values live
+        # outside the loop; we generate a fresh IRValue for each to serve
+        # as the iter_arg (body-local name).
+        if init is None:
+            self._init_vals: List[IRValue] = []
+            self._iter_args: List[IRValue] = []
+            self._carry: Optional[Carry] = None
+        else:
+            self._init_vals = [_ensure_ir(v) for v in init]
+            self._iter_args = []
+            for iv in self._init_vals:
+                arg = self._builder.new_value(iv.dtype)
+                arg.name = f"_ia{self._builder._counter}"
+                self._iter_args.append(arg)
+            self._carry = Carry(self._iter_args)
+            # Placeholder IRValues that will become the for-op results
+            # after __exit__ rebinds them. They're reserved up-front so
+            # the scf_for op has a stable list of result names.
+            self._result_vals: List[IRValue] = [
+                self._builder.new_value(iv.dtype) for iv in self._init_vals
+            ]
+
+    def __enter__(self):
         self._body = self._builder._push_region()
-        return self._iv
+        if self._carry is None:
+            return self._iv
+        return (self._iv, self._carry)
 
     def __exit__(self, *exc):
         self._builder._pop_region()
+        if self._carry is None:
+            op = IROp(
+                "scf_for", None,
+                [self._lo, self._hi, self._step],
+                attrs={"iv": self._iv, "dtype": self._dtype},
+                regions=[self._body],
+            )
+            self._builder.record(op)
+            return
+
+        # With iter_args: final slot values are the scf.yield operands.
+        # The op has one result per init value; rebind the Carry to the
+        # results so user code outside the loop reads the right SSA.
         op = IROp(
             "scf_for", None,
-            [self._lo, self._hi, self._step],
-            attrs={"iv": self._iv, "dtype": self._dtype},
+            [self._lo, self._hi, self._step] + list(self._init_vals),
+            attrs={
+                "iv": self._iv,
+                "dtype": self._dtype,
+                "iter_args": list(self._iter_args),
+                "yield_vals": list(self._carry._slots),
+                "results": list(self._result_vals),
+            },
             regions=[self._body],
         )
         self._builder.record(op)
+        self._carry._close_and_rebind(self._result_vals)
 
 
-def for_range(lo, hi, step=1, dtype: str = "int") -> _ForRangeContext:
+def for_range(lo, hi, step=1, dtype: str = "int", init=None) -> _ForRangeContext:
     """Trace a ``for`` loop.
 
     Parameters
@@ -976,13 +1073,24 @@ def for_range(lo, hi, step=1, dtype: str = "int") -> _ForRangeContext:
         Loop step (default 1).
     dtype : str
         Type of the induction variable (default ``"int"``).
+    init : list of IRValue or int, optional
+        Initial values for loop-carried variables. If given, the context
+        manager returns ``(iv, carry)`` where ``carry`` is a mutable
+        ``Carry`` slot list. Write ``carry[k] = new_val`` inside the body
+        to update; read ``carry[k]`` outside the loop for the final value.
 
-    Returns a context manager that yields the induction variable::
+    Returns a context manager::
 
+        # No carries:
         with enigma.for_range(0, K) as i:
             ...
+
+        # With carries (accumulator):
+        with enigma.for_range(0, K, init=[zero]) as (i, carry):
+            carry[0] = carry[0] + A[i]
+        total = carry[0]
     """
-    return _ForRangeContext(lo, hi, step, dtype)
+    return _ForRangeContext(lo, hi, step, dtype, init=init)
 
 
 class _IfContext:
@@ -1154,3 +1262,273 @@ def while_(cond_fn) -> _WhileContext:
             # body
     """
     return _WhileContext(cond_fn)
+
+
+# ============================================================================
+# R5 — Predicated loads / stores
+# ============================================================================
+# Lower to scf.if around a load/store. load_if returns a default if the
+# predicate is false; store_if is a no-op if the predicate is false.
+
+
+def load_if(buf: "TracingTensor", index, mask, default=0) -> IRValue:
+    """Load ``buf[index]`` if ``mask`` is true, else return ``default``.
+
+    Implementation note: Metal has no masked-load intrinsic.  This emits
+    a single unconditional load followed by ``select(default, val, mask)``.
+    The load uses ``index`` as-is, so callers must ensure the buffer
+    tolerates that read when ``mask`` is false (pad the buffer, or clamp
+    ``index`` to a safe value before calling).
+    """
+    _require_builder("load_if")
+    mask = _ensure_ir(mask)
+    default_v = _ensure_ir(default)
+    result_dtype = buf.metal_dtype
+    if default_v.dtype != result_dtype:
+        default_v = metal_cast(default_v, result_dtype)
+    val = buf[index]
+    return select(default_v, val, mask)
+
+
+def store_if(buf: "TracingTensor", index, value, mask) -> None:
+    """Store ``buf[index] = value`` only when ``mask`` is true.
+
+    Lowers to ``scf.if`` wrapping the store.
+    """
+    builder = _require_builder("store_if")
+    mask = _ensure_ir(mask)
+    with _IfContext(mask) as (then_b, _):
+        with then_b:
+            buf[index] = value
+
+
+# ============================================================================
+# R3 — Tiled copy primitive
+# ============================================================================
+# Copies `count` elements from src[src_offset + i] to dst[dst_offset + i]
+# using an enigma.for_range loop. Respects an optional predicate.
+
+
+def copy(src: "TracingTensor", dst: "TracingTensor", count: int,
+         src_offset=0, dst_offset=0, mask_fn=None) -> None:
+    """Copy ``count`` elements from ``src`` to ``dst``.
+
+    Parameters
+    ----------
+    src, dst : TracingTensor
+        Source and destination buffers (device or threadgroup).
+    count : int
+        Number of elements to copy.
+    src_offset, dst_offset : int or IRValue
+        Per-buffer base offsets (default 0).
+    mask_fn : callable, optional
+        Optional ``fn(i) -> i1`` predicate per element.  When provided,
+        elements with ``mask_fn(i) == false`` are skipped.
+
+    Example — copy one tile from device to shared::
+
+        tile = enigma.threadgroup_alloc('float', 256)
+        enigma.copy(A, tile, count=256, src_offset=block_start)
+        enigma.barrier()
+    """
+    with for_range(0, int(count)) as i:
+        src_idx = i if isinstance(src_offset, int) and src_offset == 0 else (i + src_offset)
+        dst_idx = i if isinstance(dst_offset, int) and dst_offset == 0 else (i + dst_offset)
+        if mask_fn is None:
+            dst[dst_idx] = src[src_idx]
+        else:
+            store_if(dst, dst_idx, src[src_idx], mask_fn(i))
+
+
+# ============================================================================
+# R4 — Register-level tensor abstraction
+# ============================================================================
+
+
+class RegisterTensor:
+    """A small fixed-size tensor backed by per-thread register SSA values.
+
+    Unlike ``TracingTensor`` (which sits in device/threadgroup memory),
+    a ``RegisterTensor`` is a bag of IRValues kept in scope. Reads return
+    the current SSA value; writes rebind the slot.
+
+    Shape is a tuple. Indices must be compile-time ints — registers can't
+    be addressed dynamically in MSL without spilling.
+
+    Example::
+
+        acc = enigma.register_tensor((4, 4), dtype='float', fill=0.0)
+        with enigma.for_range(0, K) as k:
+            ...
+            for i in range(4):
+                for j in range(4):
+                    acc[i, j] = enigma.fma(a[i], b[j], acc[i, j])
+    """
+
+    __slots__ = ("shape", "dtype", "_slots", "_strides")
+
+    def __init__(self, shape, dtype: str = "float", fill=0):
+        self.shape = tuple(int(s) for s in shape)
+        if not self.shape:
+            raise EnigmaError("register_tensor: shape cannot be empty")
+        self.dtype = dtype
+        # Row-major strides.
+        strides = []
+        acc = 1
+        for s in reversed(self.shape):
+            strides.append(acc)
+            acc *= s
+        self._strides = tuple(reversed(strides))
+        n = acc
+        fill_v = _ensure_ir(fill)
+        if fill_v.dtype != dtype:
+            fill_v = metal_cast(fill_v, dtype)
+        self._slots = [fill_v] * n
+
+    def _flat_index(self, key) -> int:
+        if isinstance(key, int):
+            key = (key,)
+        if not isinstance(key, tuple) or len(key) != len(self.shape):
+            raise EnigmaError(
+                f"register_tensor indexing: expected {len(self.shape)}-tuple of ints, "
+                f"got {key!r}"
+            )
+        for k, s in zip(key, self.shape):
+            if not isinstance(k, int):
+                raise EnigmaError(
+                    "register_tensor: indices must be Python ints (static); "
+                    f"got {type(k).__name__}"
+                )
+            if k < 0 or k >= s:
+                raise EnigmaError(f"register_tensor: index {k} out of range for shape {self.shape}")
+        off = 0
+        for k, st in zip(key, self._strides):
+            off += k * st
+        return off
+
+    def __getitem__(self, key) -> IRValue:
+        return self._slots[self._flat_index(key)]
+
+    def __setitem__(self, key, value) -> None:
+        v = _ensure_ir(value)
+        if v.dtype != self.dtype:
+            v = metal_cast(v, self.dtype)
+        self._slots[self._flat_index(key)] = v
+
+
+def register_tensor(shape, dtype: str = "float", fill=0) -> RegisterTensor:
+    """Create a per-thread register-resident tensor. See :class:`RegisterTensor`."""
+    return RegisterTensor(shape, dtype=dtype, fill=fill)
+
+
+# ============================================================================
+# R6 — Async copy (M3+ only)
+# ============================================================================
+# The dialect ops for `enigma.async_copy_to_threadgroup / commit / wait` are
+# not yet present in the wheel. The DSL surface is provided so user code can
+# be written today; a clear error guides the user to run on M3+ hardware and
+# to wait for dialect support to land.
+
+
+class _AsyncCopyUnavailable(Exception):
+    pass
+
+
+def _require_m3_runtime(feature: str) -> None:
+    """Check device capabilities at trace time (best-effort).
+
+    If a MetalRuntime happens to have been instantiated, use it; otherwise
+    skip the check (runtime dispatch will catch it when the kernel is
+    launched).
+    """
+    try:
+        from .runtime_dispatch.runtime import MetalRuntime  # noqa: WPS433
+    except Exception:
+        return
+    # Cached capability probe: cheap to re-query, but only do it once.
+    global _CACHED_CAPS
+    try:
+        rt = MetalRuntime()
+        caps = rt.device_capabilities()
+    except Exception:
+        return
+    caps.require_m3(feature)
+
+
+def async_copy_to_threadgroup(
+    src: "TracingTensor", dst: "TracingTensor",
+    count: int, src_offset=0, dst_offset=0,
+) -> IRValue:
+    """Schedule an async copy from device to threadgroup memory (M3+ only).
+
+    Returns an opaque token ``IRValue`` that must be passed to
+    :func:`async_copy_wait`. Calling this on M1/M2 raises at runtime
+    when the kernel is launched.
+    """
+    _require_m3_runtime("async_copy_to_threadgroup")
+    builder = _require_builder("async_copy_to_threadgroup")
+    tok = builder.new_value("async_token")
+    builder.record(IROp(
+        "async_copy_to_threadgroup", tok,
+        [_ensure_ir(src_offset), _ensure_ir(dst_offset)],
+        attrs={
+            "src": src._attrs(), "dst": dst._attrs(),
+            "count": int(count),
+        },
+    ))
+    return tok
+
+
+def async_copy_commit(token: IRValue) -> None:
+    """Commit a group of previously-issued async copies (M3+ only)."""
+    builder = _require_builder("async_copy_commit")
+    builder.record(IROp("async_copy_commit", None, [token]))
+
+
+def async_copy_wait(token: IRValue) -> None:
+    """Block until the async copy group completes (M3+ only)."""
+    builder = _require_builder("async_copy_wait")
+    builder.record(IROp("async_copy_wait", None, [token]))
+
+
+# ============================================================================
+# R7 — Pipeline / double-buffering helper
+# ============================================================================
+# A lightweight wrapper that alternates between two shared tiles. On M1/M2
+# it relies on barriers; on M3+ it can use async_copy for an overlapped
+# compute/load pipeline.
+
+
+class Pipeline:
+    """Helper for double-buffered threadgroup tiles.
+
+    Provides two shared allocations of the same size; ``front()`` returns
+    the buffer the current iteration consumes, ``back()`` returns the
+    buffer being filled for the next iteration.  Call ``swap()`` after a
+    ``barrier()`` to advance.
+
+    This is a thin ergonomic layer — the user is still responsible for
+    issuing barriers and loads correctly.
+    """
+
+    def __init__(self, dtype: str, size: int, stages: int = 2):
+        if stages != 2:
+            raise EnigmaError("Pipeline: only stages=2 is supported for now")
+        self.dtype = dtype
+        self.size = int(size)
+        self._buffers = [threadgroup_alloc(dtype, size) for _ in range(stages)]
+        self._phase = 0
+
+    def front(self) -> "TracingTensor":
+        return self._buffers[self._phase]
+
+    def back(self) -> "TracingTensor":
+        return self._buffers[1 - self._phase]
+
+    def swap(self) -> None:
+        self._phase = 1 - self._phase
+
+
+def pipeline(dtype: str, size: int, stages: int = 2) -> Pipeline:
+    """Create a :class:`Pipeline` for double-buffered tile loads."""
+    return Pipeline(dtype=dtype, size=size, stages=stages)

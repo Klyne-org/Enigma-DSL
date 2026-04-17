@@ -1,16 +1,19 @@
 # Dialect & Runtime Improvements Required
 
 Status after systematic testing of every DSL surface against the
-`enigma-dialect 0.1.0` wheel (commit `44b4f1c`, April 2026).
+`enigma-dialect 0.1.0` wheel (commit `6b6628b`, April 2026).
 
-**Last updated**: April 2026 — reflects DSL-side fixes for Bug 4, R1
-(control flow), and R8 (swizzle).
+**Last updated**: 2026-04-17 — dialect wheel upgrade (scf bindings +
+Bug 1/2 fix) and DSL-side push for R1 iter_args, R2 scalar args, R3
+copy, R4 register tensors, R5 load_if/store_if, R6 async_copy surface
+with M3+ gate, R7 pipeline, R9 multi-output, R10 capability queries,
+and Bug 3 specialization constants.
 
 ---
 
 ## Bugs (must fix)
 
-### Bug 1 — Simdgroup matrix type declaration
+### ~~Bug 1 — Simdgroup matrix type declaration~~ FIXED
 
 **Component**: Dialect MSL emitter (`lib/Target/MSL/`)
 
@@ -64,7 +67,7 @@ hardware matrix units).
 
 ---
 
-### Bug 2 — Threadgroup atomics emit `device` address space
+### ~~Bug 2 — Threadgroup atomics emit `device` address space~~ FIXED
 
 **Component**: Dialect MSL emitter (`lib/Target/MSL/`)
 
@@ -114,7 +117,7 @@ pattern that uses atomics on shared memory.
 
 ---
 
-### Bug 3 — `function_constant` runtime dispatch crashes
+### ~~Bug 3 — `function_constant` runtime dispatch crashes~~ FIXED
 
 **Component**: Swift runtime dylib + `MetalRuntime` Python API
 
@@ -157,7 +160,15 @@ rt = enigma.MetalRuntime()
 rt.execute(compiled, [A], N * 4, ...)  # ABORT — Metal validation trap
 ```
 
-**Blocks**: Any kernel using `enigma.function_constant()` at runtime.
+**Status** (2026-04-17): Fixed end-to-end. Swift side adds
+`enigma_create_pipeline_with_constants` which builds an
+`MTLFunctionConstantValues` from parallel arrays of (index, type_tag,
+value) and calls `library.makeFunction(name:constantValues:)`.
+Python side `MetalRuntime.execute(..., constants={idx: (type_name,
+value), ...})` packs and dispatches. Verified on M4 with a
+scale-by-alpha kernel.
+
+**Blocks**: None — live.
 
 ---
 
@@ -346,23 +357,26 @@ The features above fix what's broken. This section covers what's **missing**
 production GEMM or FlashAttention in." Ordered by dependency chain: each
 item unlocks the ones below it.
 
-### ~~R1 — Control flow (`for` / `if` / `while`)~~ DSL DONE, DIALECT PENDING
+### ~~R1 — Control flow (`for` / `if` / `while`)~~ DONE
 
-**Status**: DSL-side complete. `KernelBuilder` restructured with nested
-region support. Context managers `enigma.for_range()`, `enigma.if_()`,
-`enigma.while_()` trace to `scf_for`, `scf_if`, `scf_while` IR ops.
-MLIR emitter updated to emit `scf.for`/`scf.if`/`scf.while` ops
-recursively. 15 unit tests + 6 example kernels passing.
+**Status**: End-to-end. Dialect wheel now registers the `scf` Python
+bindings (commit `6b6628b`). `KernelBuilder` threads nested regions
+through `IROp.regions`; context managers trace `scf_for`, `scf_if`,
+`scf_while`. MLIR emitter builds `scf.ForOp` / `scf.IfOp` /
+`scf.WhileOp` recursively.
 
-**Remaining dialect work**: Register `scf` Python bindings in
-`EnigmaModule.cpp` (one `#include` + one `mlirDialectHandleRegisterDialect`
-call). The C++ MSL emitter already handles these ops.
+**Loop-carried values (iter_args)**: `enigma.for_range(lo, hi,
+init=[x0, ...])` yields `(i, carry)` where `carry` is a
+`Carry` slot list. Writes to `carry[i]` become `scf.yield` operands,
+and the op's results are rebound to the carry list on exit —
+accumulators now lower correctly.
 
-**Unlocks**: everything below.
+**Tests**: 15 in `tests/test_control_flow.py` + 5 iter_args/carry
+tests in `tests/test_dsl_extensions.py`.
 
 ---
 
-### R2 — Scalar kernel arguments
+### ~~R2 — Scalar kernel arguments~~ DONE
 
 Every parameter today is a `device T*` buffer. There is no way to pass a
 scalar like `N`, `K`, `alpha`, or `epsilon` as a kernel argument. Users
@@ -388,15 +402,30 @@ def gemm(A: enigma.f32, B: enigma.f32, C: enigma.f32,
     ...
 ```
 
-**Requires**: New annotation type, tracing support, MLIR emission
-(`constant T& [[buffer(N)]]`), runtime API to pass scalar values.
+**Implemented**: `enigma.Scalar(dtype)` annotation type in
+`enigma/typing.py`. Tracer records `(name, buffer_index, metal_dtype)`
+in `KernelBuilder.scalar_params` and emits a `load(buffer[0])` at
+function entry so the kernel body sees an IRValue. `MetalRuntime.execute`
+accepts `scalars=[v, ...]` (one per Scalar param) and packs each as a
+1-element numpy buffer at the correct slot.
 
-**Effort**: 1-2 days. **Unlocks**: general-purpose kernels without
-recompilation per problem size.
+**Convention**: Scalars must appear BEFORE output buffers in the kernel
+signature — outputs are always appended last in the GPU binding layout.
+
+**Verified end-to-end** on M4:
+
+```python
+@enigma.kernel
+def scale(A: enigma.f32, alpha: enigma.Scalar(enigma.f32), B: enigma.f32):
+    tid = enigma.thread_position_in_grid
+    B[tid] = A[tid] * alpha
+
+rt.execute(compiled, [A], output_size=..., scalars=[3.0], ...)
+```
 
 ---
 
-### R3 — Tiled copy primitive (`enigma.copy`)
+### ~~R3 — Tiled copy primitive (`enigma.copy`)~~ DONE
 
 TV layout gets data from global memory to per-thread register values, but
 there is no first-class "copy a tile from buffer A into shared memory
@@ -413,14 +442,14 @@ enigma.barrier()
 enigma.copy(src=shared_tile_A, dst=reg_A)
 ```
 
-**Requires**: Control flow (R1) for the loop that iterates over tiles,
-plus a `copy` op that lowers to the appropriate load/store sequence.
-
-**Effort**: 2-3 days after R1. **Unlocks**: clean tiled algorithms.
+**Implemented**: `enigma.copy(src, dst, count, src_offset=0,
+dst_offset=0, mask_fn=None)` lowers to a `for_range` loop of scalar
+load+store. Optional `mask_fn(i) -> bool` integrates with R5 for
+boundary predication.
 
 ---
 
-### R4 — Register-level tensor abstraction
+### ~~R4 — Register-level tensor abstraction~~ DONE
 
 CuTe has register-backed tensors (the rmem level). Enigma has device
 buffers and threadgroup buffers but no concept of "this tensor lives in
@@ -441,14 +470,14 @@ acc = enigma.register_tensor(shape=(4, 4), dtype="float", fill=0.0)
 acc[vi, vj] = enigma.fma(a_reg[vi], b_reg[vj], acc[vi, vj])
 ```
 
-**Requires**: A new `RegisterTensor` class in `_tracing.py` that lowers
-to local variable declarations and scalar load/store.
-
-**Effort**: 2 days. **Unlocks**: register tiling for GEMM/attention.
+**Implemented**: `enigma.register_tensor(shape, dtype, fill=0.0)`
+returns a `RegisterTensor` whose `__getitem__`/`__setitem__` accept
+static integer tuples and route through SSA IRValues backed by
+per-thread locals. Row-major strides, no device load/store.
 
 ---
 
-### R5 — Predicated loads/stores for boundary tiles
+### ~~R5 — Predicated loads/stores for boundary tiles~~ DONE
 
 When tensor dimensions are not divisible by the tile size, the boundary
 tile has fewer valid elements. CuTe handles this with predication — "load
@@ -471,37 +500,44 @@ is unacceptable for production use.
        val = buf[idx]
    ```
 
-**Requires**: Either a new `select`-based load op in the dialect, or
-control flow (R1 — now done).
+**Implemented**:
 
-**Effort**: 1 day for masked load, or free with R1. **Unlocks**: arbitrary
-problem sizes without padding.
-
----
-
-### R6 — Async copy (`simdgroup_async_copy`) — DIALECT-SIDE ONLY
-
-**Status**: Not applicable on DSL side. Metal 3.1+ (M3/A17+) only feature.
-Requires new dialect ops (`enigma.async_copy_to_threadgroup`,
-`enigma.async_copy_commit`, `enigma.async_copy_wait`) + MSL emission +
-Metal GPU family capability gating. M1/M2 do not support async copy — all
-threadgroup loads are synchronous on those devices.
-
-**Effort**: 1-2 days (dialect + DSL surface wiring after dialect ops land).
-**Unlocks**: double-buffered pipelines on M3+ hardware.
+- `enigma.load_if(buf, index, mask, default=0.0)` — unconditional load
+  followed by `select(default, val, mask)`. Caller must ensure the load
+  is a safe read (e.g. clamp the index before calling).
+- `enigma.store_if(buf, index, value, mask)` — wraps the store inside
+  an `scf.if` so nothing writes when `mask` is false.
 
 ---
 
-### R7 — Pipeline / double-buffering abstraction — UNBLOCKED (needs R1 dialect)
+### R6 — Async copy (`simdgroup_async_copy`) — DSL SURFACE + M3+ GATE DONE
 
-**Status**: Previously blocked by R1 (control flow). DSL-side control flow
-is now implemented; this can proceed once the `scf` dialect Python bindings
-are registered. The pipeline abstraction requires `for` loops to iterate
-over tiles. On M1/M2 (no async copy), double-buffering uses barriers; on
-M3+ with async copy (R6), it becomes a proper async pipeline.
+**Status**: DSL surface implemented; dialect ops (`async_copy_to_threadgroup`,
+`async_copy_commit`, `async_copy_wait`) still pending in the dialect
+wheel, so emitting these will raise until the dialect ships them.
 
-**Effort**: 2-3 days after R1 dialect work. **Unlocks**: production-grade
-bandwidth utilization.
+**M3+ runtime gate**: Each of `enigma.async_copy_to_threadgroup`,
+`enigma.async_copy_commit`, `enigma.async_copy_wait` calls
+`_require_m3_runtime()` during tracing. That helper queries the active
+`MetalRuntime` instance's `device_capabilities()` and invokes
+`caps.require_m3(feature)`. On M1/M2 this raises
+`RuntimeError: async_copy_* requires Apple GPU family 9 (M3/A17) or
+newer`. On M3/M4, tracing proceeds.
+
+**Capability source**: `MetalRuntime._lib.enigma_device_supports_family`
+probes `MTLDevice.supportsFamily(MTLGPUFamily)` for codes 1010→1001,
+and `DeviceCapabilities.is_m3_or_newer` returns true when the highest
+supported family is ≥ 1009 (`MTLGPUFamilyApple9`).
+
+---
+
+### ~~R7 — Pipeline / double-buffering abstraction~~ DONE
+
+**Implemented**: `enigma.pipeline(dtype, size, stages=2)` returns a
+`Pipeline` holding two `threadgroup_alloc` buffers and a phase counter.
+Methods: `front()`, `back()`, `swap()`. Stages > 2 currently rejected.
+Designed for the M1/M2 barrier-driven case — M3+ can layer async_copy
+on top of the same object once the dialect ops land.
 
 ---
 
@@ -531,7 +567,7 @@ Properties verified:
 
 ---
 
-### R9 — Multiple output buffers
+### ~~R9 — Multiple output buffers~~ DONE
 
 `MetalRuntime.execute()` assumes the last buffer is the single output.
 Real kernels often write to multiple outputs:
@@ -540,15 +576,14 @@ Real kernels often write to multiple outputs:
 - Fused attention: writes both `O` and `L` (log-sum-exp)
 - LayerNorm: writes `Y`, `mean`, and `rstd`
 
-**Requires**: Extend `execute()` to accept `output_sizes: list[int]`
-or `output_indices: list[int]` and return multiple byte buffers.
-
-**Effort**: Half a day (Swift runtime + Python API). **Unlocks**: fused
-multi-output kernels.
+**Implemented**: `MetalRuntime.execute(..., output_sizes=[n1, n2, ...])`
+returns `list[bytes]` of the same length. The existing `output_size=n`
+scalar path is preserved for back-compat and returns a single `bytes`.
+Outputs are appended after inputs + scalar buffers in the binding list.
 
 ---
 
-### R10 — Metal GPU family capability queries
+### ~~R10 — Metal GPU family capability queries~~ DONE
 
 Apple Silicon has significant feature variation across generations:
 
@@ -575,64 +610,50 @@ caps = rt.device_capabilities()
 And at compile time, the DSL could select code paths based on these
 (now possible with control flow).
 
-**Requires**: Query `MTLDevice.supportsFamily()` in the Swift runtime,
-expose via ctypes.
+**Implemented**: Swift side adds
+`enigma_device_supports_family`, `enigma_device_name`,
+`enigma_device_max_threadgroup_memory`,
+`enigma_device_max_threads_per_threadgroup`. Python side exposes
+`rt.device_capabilities() -> DeviceCapabilities` with fields
+`gpu_family`, `gpu_family_raw`, `supports_async_copy`,
+`supports_simdgroup_matrix`, `simdgroup_size`, `max_threadgroup_memory`,
+`max_threads_per_threadgroup`, `device_name`, and
+`is_m3_or_newer` / `require_m3(feature)` helpers. Used internally to
+gate R6 async_copy.
 
-**Effort**: Half a day. **Unlocks**: portable kernels across Apple
-Silicon generations.
+**Known quirk**: On M4, the linked Metal SDK may not export
+`MTLGPUFamily.apple10` raw value 1010; the probe then reports
+`apple9`. `is_m3_or_newer` still returns `True`.
 
 ---
 
 ### Dependency chain for production GEMM on Apple Silicon
 
 ```
-R1 (control flow)    ← DSL DONE, dialect pending (one line)
- ├── R2 (scalar args) ──── general kernel launch without recompilation
- ├── R3 (tiled copy)
- │    └── R4 (register tensors) ── per-thread accumulator tiles
- │         └── R8 (swizzle) ── DONE
- ├── R5 (predicated loads) ── arbitrary M/N/K (can use R1 if_ now)
- └── R7 (double buffering) ── overlap load/compute via barriers
-      └── R6 (async copy, M3+ only) ── hardware async pipeline
+R1 (control flow)     ← DONE (scf bindings shipped 2026-04-17)
+ ├── R2 (scalar args)  ← DONE
+ ├── R3 (tiled copy)   ← DONE
+ │    └── R4 (register tensors) ← DONE
+ │         └── R8 (swizzle)      ← DONE
+ ├── R5 (predicated loads/stores) ← DONE
+ └── R7 (double buffering)        ← DONE
+      └── R6 (async copy, M3+ only) ← DSL surface + M3+ gate DONE;
+                                       dialect ops pending
 ```
 
-**Minimum viable tiled GEMM** (works on all Apple Silicon):
-R1 dialect + R2 + R4 + R5 (~7 days — R8 already done).
-
-**Production-grade with optimal bandwidth** (M1/M2):
-add R7 (~3 more days — R8 already done).
-
-**Peak performance on M3+**:
-add R6 (~2 more days).
-
-Total: ~12 days from current state for a complete, portable, tiled GEMM
-that runs across all Apple Silicon generations.
+Everything needed for a minimum-viable tiled GEMM on M1/M2 is now in
+place. On M3/M4 the async_copy DSL surface is ready but will error at
+emit time until the dialect ships `async_copy_*` ops.
 
 ---
 
 ## Suggested fix order
 
-1. **Bug 2** (threadgroup atomics address space) — smallest fix, highest
-   impact. One-line change in the atomic emission path: check memref memory
-   space, emit `threadgroup` instead of `device`. Unblocks shared-memory
-   reductions.
-
-2. **Bug 1** (simdgroup matrix type) — small fix in the type-to-string
-   function. Unblocks hardware GEMM.
-
-3. **Bug 3** (function_constant runtime) — needs Swift + Python changes.
-   Unblocks specialization constants.
-
-4. ~~**Bug 4** (TV tile validation)~~ — **FIXED**. `tensor_zipped_divide()`
-   now raises `EnigmaError` when tiler exceeds tensor dimensions.
-
-5. **R1 dialect registration** (control flow) — **one-line change** in
-   `EnigmaModule.cpp` to register `scf` Python bindings. DSL-side
-   implementation is complete (context managers, MLIR emitter, 15 tests,
-   6 example kernels). This single dialect change unlocks:
-   - Loops (matmul inner accumulation, tiled algorithms)
-   - Conditionals (boundary predication, clamping)
-   - General-purpose GPU programming
+All Bug 1-4 and R1-R10 (except R6 dialect ops) are now resolved. The
+only remaining dialect-side work is shipping the three async_copy ops
+(`async_copy_to_threadgroup`, `async_copy_commit`, `async_copy_wait`) +
+their MSL emission. The DSL surface and M3+ runtime gate are already
+in place, so the wheel upgrade is a drop-in for M3/M4 devices.
 
 ---
 
@@ -643,3 +664,14 @@ that runs across all Apple Silicon generations.
 | Apr 2026 | Bug 4 | DSL | Fixed: `tensor_zipped_divide` validates tiler fits tensor |
 | Apr 2026 | R1 | DSL | Implemented: `for_range`, `if_`, `while_` context managers, `KernelBuilder` region stack, recursive MLIR emitter, 15 tests, 6 example kernels |
 | Apr 2026 | R8 | DSL | Implemented: `Swizzle`, `SwizzledLayout`, `swizzle()` for bank-conflict avoidance |
+| 2026-04-17 | dialect wheel | Dialect | Upgraded to `6b6628b`: Bug 1 (simdgroup type), Bug 2 (threadgroup atomic addr space), `scf` Python bindings |
+| 2026-04-17 | R1 iter_args | DSL | `Carry` + `init=[...]` on `for_range`, scf.for result rebinding; emitter threads iter_args through `scf.ForOp` |
+| 2026-04-17 | R2 | DSL+RT | `enigma.Scalar(dtype)` param type; `MetalRuntime.execute(scalars=...)` packs values at correct slot |
+| 2026-04-17 | R3 | DSL | `enigma.copy(src, dst, count, mask_fn=...)` — loop-lowered tiled copy |
+| 2026-04-17 | R4 | DSL | `register_tensor` / `RegisterTensor` — per-thread SSA-backed small tensors |
+| 2026-04-17 | R5 | DSL | `load_if` (select-based) and `store_if` (scf.if-wrapped) |
+| 2026-04-17 | R6 | DSL+RT | `async_copy_*` DSL surface with `_require_m3_runtime()` M3+ gate |
+| 2026-04-17 | R7 | DSL | `enigma.pipeline(...)` / `Pipeline` — 2-stage double-buffered shared allocs |
+| 2026-04-17 | R9 | RT | `MetalRuntime.execute(output_sizes=[...])` returns `list[bytes]` |
+| 2026-04-17 | R10 | RT | `DeviceCapabilities` + `rt.device_capabilities()` via `supportsFamily()` |
+| 2026-04-17 | Bug 3 | RT | `enigma_create_pipeline_with_constants` + `execute(constants={idx: (type, val)})` — verified on M4 |

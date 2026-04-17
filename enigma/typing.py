@@ -84,3 +84,33 @@ u32 = UInt32()
 i64 = Int64()
 u64 = UInt64()
 b1 = Bool()
+
+
+class Scalar:
+    """Kernel-argument annotation for a scalar (non-buffer) parameter.
+
+    Usage::
+
+        @enigma.kernel
+        def gemm(A: enigma.f32, B: enigma.f32, C: enigma.f32,
+                 M: enigma.Scalar(enigma.u32),
+                 alpha: enigma.Scalar(enigma.f32)):
+            ...
+
+    A ``Scalar`` parameter is passed by value at runtime and is available
+    inside the kernel as an ``IRValue`` of the annotated dtype.  It is
+    packed into a 1-element device buffer under the hood (so no dialect
+    changes are needed); the runtime handles packing.
+    """
+
+    def __init__(self, dtype: Numeric):
+        if not isinstance(dtype, Numeric):
+            raise TypeError(
+                f"Scalar(dtype): dtype must be an enigma numeric (e.g. enigma.f32), got {dtype!r}"
+            )
+        self.dtype = dtype
+        self.metal_name = dtype.metal_name
+        self.width = dtype.width
+
+    def __repr__(self):
+        return f"Scalar({self.metal_name})"
