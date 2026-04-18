@@ -6,8 +6,8 @@ import inspect
 import threading
 from typing import Callable, Optional, Tuple
 
-from .._tracing import KernelBuilder, TracingTensor
-from ..typing import Numeric
+from .._tracing import IROp, IRValue, KernelBuilder, TracingTensor
+from ..typing import Numeric, Scalar
 
 _jit_local = threading.local()
 
@@ -98,6 +98,8 @@ class KernelHandle:
 
 
 def _metal_dtype_from_annotation(ann) -> str:
+    if isinstance(ann, Scalar):
+        return ann.metal_name
     if isinstance(ann, Numeric):
         return ann.metal_name
     if isinstance(ann, type) and issubclass(ann, Numeric):
@@ -106,20 +108,41 @@ def _metal_dtype_from_annotation(ann) -> str:
 
 
 def trace_kernel(kdef: KernelDef) -> KernelBuilder:
-    """Trace a @kernel with type-annotated params (naive path)."""
+    """Trace a @kernel with type-annotated params (naive path).
+
+    Scalar-annotated params (``enigma.Scalar(dtype)``) are lowered to a
+    1-element buffer and auto-loaded at the top of the kernel; user code
+    sees them as ``IRValue``s directly.
+    """
     builder = KernelBuilder(kdef.name)
     params = list(kdef._sig.parameters.values())
 
-    proxies = []
-    for idx, param in enumerate(params):
-        ann = param.annotation
-        if ann is inspect.Parameter.empty:
-            raise TypeError(f"Kernel parameter '{param.name}' needs a type annotation")
-        metal_dtype = _metal_dtype_from_annotation(ann)
-        proxy = TracingTensor(param.name, idx, metal_dtype)
-        builder.args.append((param.name, idx, metal_dtype))
-        proxies.append(proxy)
+    # Track scalar-param metadata so the runtime can pack values at dispatch.
+    builder.scalar_params: list[tuple[str, int, str]] = []
 
+    proxies = []
     with builder:
+        for idx, param in enumerate(params):
+            ann = param.annotation
+            if ann is inspect.Parameter.empty:
+                raise TypeError(f"Kernel parameter '{param.name}' needs a type annotation")
+            metal_dtype = _metal_dtype_from_annotation(ann)
+            builder.args.append((param.name, idx, metal_dtype))
+            if isinstance(ann, Scalar):
+                # Record as a 1-element device buffer. Auto-emit a load at
+                # buffer[0] so the kernel body sees an IRValue of the scalar dtype.
+                builder.scalar_params.append((param.name, idx, metal_dtype))
+                buf_proxy = TracingTensor(param.name, idx, metal_dtype)
+                idx0 = builder.make_const("uint", 0)
+                scalar_val = builder.new_value(metal_dtype)
+                scalar_val.name = f"_scalar_{param.name}"
+                builder.record(IROp(
+                    "load", scalar_val, [idx0],
+                    attrs=buf_proxy._attrs(),
+                ))
+                proxies.append(scalar_val)
+            else:
+                proxies.append(TracingTensor(param.name, idx, metal_dtype))
+
         kdef.fn(*proxies)
     return builder

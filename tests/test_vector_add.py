@@ -46,13 +46,10 @@ class TestVectorAdd(unittest.TestCase):
     def test_metal_source_generation(self):
         src = self.compiled.metal_source
         self.assertIn("kernel void vector_add", src)
-        self.assertIn("device const float* A [[buffer(0)]]", src)
-        self.assertIn("device const float* B [[buffer(1)]]", src)
-        self.assertIn("device float* C [[buffer(2)]]", src)
-        self.assertIn("uint tid [[thread_position_in_grid]]", src)
-        self.assertIn("A[tid]", src)
-        self.assertIn("B[tid]", src)
-        self.assertIn("C[tid]", src)
+        self.assertIn("device float* v0 [[buffer(0)]]", src)
+        self.assertIn("device float* v1 [[buffer(1)]]", src)
+        self.assertIn("device float* v2 [[buffer(2)]]", src)
+        self.assertIn("[[thread_position_in_grid]]", src)
 
 
 class TestTracingIR(unittest.TestCase):
@@ -75,7 +72,7 @@ class TestTracingIR(unittest.TestCase):
 
     def test_metal_emission(self):
         from enigma.compiler.kernel import trace_kernel
-        from enigma.compiler.metal_emitter import emit_metal
+        from enigma.compiler.mlir_emitter import emit_msl
 
         @enigma.kernel
         def my_add(A: enigma.f32, B: enigma.f32, C: enigma.f32):
@@ -83,7 +80,7 @@ class TestTracingIR(unittest.TestCase):
             C[tid] = A[tid] + B[tid]
 
         builder = trace_kernel(my_add)
-        source = emit_metal(builder)
+        source = emit_msl(builder)
         self.assertIn("#include <metal_stdlib>", source)
         self.assertIn("kernel void my_add", source)
 

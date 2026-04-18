@@ -16,5 +16,9 @@ enigma/_version.py
 __pycache__/
 *.egg-info/
 
+# Virtual environments
+.venv/
+venv/
+
 # OS files
 .DS_Store
