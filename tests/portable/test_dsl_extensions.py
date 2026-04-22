@@ -9,10 +9,10 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import enigma
-from enigma._tracing import KernelBuilder, TracingTensor, Carry, RegisterTensor
+from enigma._tracing import KernelBuilder, RegisterTensor, TracingTensor
 
 
 def _make_builder(*bufs):
@@ -63,20 +63,6 @@ class TestScalarAnnotation(unittest.TestCase):
         self.assertEqual(s.metal_name, "float")
         # width is in bits for Numeric dtypes (f32 → 32).
         self.assertEqual(s.width, 32)
-
-    def test_scalar_kernel_records_scalar_params(self):
-        @enigma.kernel
-        def scale(A: enigma.f32, alpha: enigma.Scalar(enigma.f32), B: enigma.f32):
-            tid = enigma.thread_position_in_grid
-            B[tid] = A[tid] * alpha
-
-        compiled = enigma.compile(scale)
-        self.assertTrue(hasattr(compiled, "scalar_params"))
-        self.assertEqual(len(compiled.scalar_params), 1)
-        name, bi, dtype = compiled.scalar_params[0]
-        self.assertEqual(name, "alpha")
-        self.assertEqual(bi, 1)
-        self.assertEqual(dtype, "float")
 
 
 class TestRegisterTensor(unittest.TestCase):

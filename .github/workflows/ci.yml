@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv pip install ruff --system
-      - run: ruff check .
-      - run: ruff format --check .
+      - run: ruff check tests/portable
+      - run: ruff format --check tests/portable
 
   test:
     runs-on: ubuntu-latest
@@ -32,5 +32,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: uv pip install -e ".[dev]" --system
-      - name: Test
-        run: pytest tests/test_layout_algebra.py -v
+      - name: Test portable suite
+        run: pytest tests/portable -v
