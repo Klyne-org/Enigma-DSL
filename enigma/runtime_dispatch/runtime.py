@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Tuple
 import numpy as np
 
 from ..compiler.compiler import CompiledKernel
+from . import mlx_interop as _mlx_interop
 
 _SWIFT_DIR = Path(__file__).parent / "swift"
 _SWIFT_SRC = _SWIFT_DIR / "libenigma_runtime.swift"
@@ -314,7 +315,7 @@ class MetalRuntime:
     def execute(
         self,
         compiled: CompiledKernel,
-        inputs: List[np.ndarray],
+        inputs: List[Any],
         output_size=None,
         grid: Tuple[int, int, int] = (1, 1, 1),
         threads: Tuple[int, int, int] = (1, 1, 1),
@@ -322,18 +323,28 @@ class MetalRuntime:
         scalars: Optional[List] = None,
         output_sizes: Optional[List[int]] = None,
         constants: Optional[dict] = None,
+        output_shapes: Optional[List[tuple]] = None,
+        output_dtypes: Optional[List] = None,
     ):
         """One-shot: create resources, dispatch, read back, cleanup.
 
+        Inputs may be ``np.ndarray`` or ``mlx.core.array`` (mixed is fine). For
+        mlx arrays the unified-memory buffer is used directly — no copy.
+
         Extra parameters (all optional):
-            scalars:       values for ``enigma.Scalar`` params, in order.
-                           Packed into 1-element buffers at the right slots.
-            output_sizes:  list of byte sizes for multiple output buffers.
-                           If given, returns ``list[bytes]``; otherwise
-                           returns a single ``bytes`` of ``output_size``.
-            constants:     dict of ``{index: (type_name, value)}`` to set
-                           Metal function constants before pipeline creation.
-                           type_name is one of float/half/int/uint/bool.
+            scalars:        values for ``enigma.Scalar`` params, in order.
+                            Packed into 1-element buffers at the right slots.
+            output_sizes:   list of byte sizes for multiple output buffers.
+                            If given, returns ``list[bytes]``; otherwise
+                            returns a single ``bytes`` of ``output_size``.
+            constants:      dict of ``{index: (type_name, value)}`` to set
+                            Metal function constants before pipeline creation.
+                            type_name is one of float/half/int/uint/bool.
+            output_shapes:  list of shapes (tuples) for mlx output arrays. Pair
+                            with ``output_dtypes``. When given, an ``mx.array``
+                            (or list of them) is returned instead of ``bytes``
+                            and the kernel writes directly into the mlx buffer.
+            output_dtypes:  list of mlx dtypes matching ``output_shapes``.
         """
         mtl_lib = self._lib.enigma_load_library(self._device, compiled.metallib_path.encode())
         if not mtl_lib:
@@ -356,41 +367,85 @@ class MetalRuntime:
                 hint="function name may not match metallib contents",
             )
 
-        if output_sizes is not None:
+        # Output mode: mlx (if output_shapes given), bytes-multi, or bytes-single.
+        mlx_output_mode = output_shapes is not None
+        if mlx_output_mode:
+            if output_dtypes is None or len(output_dtypes) != len(output_shapes):
+                raise _gpu_error(
+                    "execute: output_shapes requires output_dtypes of matching length"
+                )
+            out_sizes = [
+                _mlx_interop.mlx_nbytes(s, d)
+                for s, d in zip(output_shapes, output_dtypes)
+            ]
+            multi_out = len(output_shapes) > 1
+        elif output_sizes is not None:
             out_sizes = [int(s) for s in output_sizes]
             multi_out = True
         else:
             if output_size is None:
-                raise _gpu_error("execute: must pass output_size or output_sizes")
+                raise _gpu_error("execute: must pass output_size, output_sizes, or output_shapes")
             out_sizes = [int(output_size)]
             multi_out = False
         scalar_params = getattr(compiled, "scalar_params", None) or []
 
         gpu_bufs = []
+        mlx_output_arrays: list = []  # kept alive for the duration of dispatch
+        mlx_input_keepalive: list = []  # inputs passed as mlx.array
         try:
             merged_inputs = _merge_scalar_buffers(
                 inputs, scalars or [], scalar_params, num_outputs=len(out_sizes)
             )
             for i, arr in enumerate(merged_inputs):
-                arr = np.ascontiguousarray(arr)
-                buf = self._lib.enigma_create_buffer(self._device, arr.ctypes.data, arr.nbytes)
-                if not buf:
-                    raise _gpu_error(
-                        "failed to create input buffer",
-                        buffer_index=i,
-                        size_bytes=arr.nbytes,
-                        dtype=str(arr.dtype),
-                        shape=arr.shape,
-                    )
+                if _mlx_interop.is_mlx_array(arr):
+                    mlx_input_keepalive.append(arr)
+                    ptr, nbytes = _mlx_interop.mlx_buffer_ptr_and_size(arr)
+                    buf = self._lib.enigma_create_buffer(self._device, ptr, nbytes)
+                    if not buf:
+                        raise _gpu_error(
+                            "failed to create input buffer (mlx)",
+                            buffer_index=i,
+                            size_bytes=nbytes,
+                            dtype=str(arr.dtype),
+                            shape=tuple(arr.shape),
+                        )
+                else:
+                    arr = np.ascontiguousarray(arr)
+                    buf = self._lib.enigma_create_buffer(self._device, arr.ctypes.data, arr.nbytes)
+                    if not buf:
+                        raise _gpu_error(
+                            "failed to create input buffer",
+                            buffer_index=i,
+                            size_bytes=arr.nbytes,
+                            dtype=str(arr.dtype),
+                            shape=arr.shape,
+                        )
                 gpu_bufs.append(buf)
 
             out_bufs = []
-            for sz in out_sizes:
-                ob = self._lib.enigma_create_buffer_empty(self._device, sz)
-                if not ob:
-                    raise _gpu_error("failed to create output buffer", size_bytes=sz)
-                out_bufs.append(ob)
-                gpu_bufs.append(ob)
+            if mlx_output_mode:
+                # Allocate mlx output arrays now so we can materialize their
+                # unified-memory buffers; the Metal dispatch writes to a shared
+                # Metal buffer and we memcpy the result back into the mlx array
+                # afterward. This mirrors Triton/cuTile semantics (framework
+                # tensor in, framework tensor out) without requiring the
+                # page-alignment that ``bytesNoCopy:`` would.
+                for shape, dtype in zip(output_shapes, output_dtypes):
+                    mx_out = _mlx_interop.make_mlx_output(shape, dtype)
+                    mlx_output_arrays.append(mx_out)
+                for sz in out_sizes:
+                    ob = self._lib.enigma_create_buffer_empty(self._device, sz)
+                    if not ob:
+                        raise _gpu_error("failed to create output buffer (mlx)", size_bytes=sz)
+                    out_bufs.append(ob)
+                    gpu_bufs.append(ob)
+            else:
+                for sz in out_sizes:
+                    ob = self._lib.enigma_create_buffer_empty(self._device, sz)
+                    if not ob:
+                        raise _gpu_error("failed to create output buffer", size_bytes=sz)
+                    out_bufs.append(ob)
+                    gpu_bufs.append(ob)
 
             BufArr = ctypes.c_void_p * len(gpu_bufs)
             buf_arr = BufArr(*gpu_bufs)
@@ -409,6 +464,19 @@ class MetalRuntime:
             )
             _check_dispatch(rc, compiled.kernel_name, grid, threads)
 
+            if mlx_output_mode:
+                for ob, sz, mx_out in zip(out_bufs, out_sizes, mlx_output_arrays):
+                    out_ptr = self._lib.enigma_buffer_contents(ob)
+                    dst_ptr, dst_nbytes = _mlx_interop.mlx_buffer_ptr_and_size(mx_out)
+                    if dst_nbytes < sz:
+                        raise _gpu_error(
+                            "mlx output smaller than kernel wrote",
+                            mlx_nbytes=dst_nbytes,
+                            kernel_bytes=sz,
+                        )
+                    ctypes.memmove(dst_ptr, out_ptr, sz)
+                return mlx_output_arrays if multi_out else mlx_output_arrays[0]
+
             outs: list[bytes] = []
             for ob, sz in zip(out_bufs, out_sizes):
                 out_ptr = self._lib.enigma_buffer_contents(ob)
@@ -419,6 +487,9 @@ class MetalRuntime:
                 self._lib.enigma_release(buf)
             self._lib.enigma_release(pso)
             self._lib.enigma_release(mtl_lib)
+            # mlx_input_keepalive / mlx_output_arrays fall out of scope naturally,
+            # but we only release GPU handles here — the underlying mlx buffers
+            # are managed by mlx's own allocator.
 
     def device_capabilities(self) -> "DeviceCapabilities":
         """Return capability flags for the current Metal device."""
