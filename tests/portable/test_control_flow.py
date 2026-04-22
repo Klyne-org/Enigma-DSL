@@ -9,7 +9,7 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import enigma
 from enigma._tracing import KernelBuilder, TracingTensor
@@ -33,7 +33,7 @@ class TestForRange(unittest.TestCase):
             A = TracingTensor("A", 0, "float")
             Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 10) as i:
+            with enigma.for_range(0, 10):
                 Out[tid] = A[tid]
 
         for_ops = [op for op in b.ops if op.op_type == "scf_for"]
@@ -59,7 +59,7 @@ class TestForRange(unittest.TestCase):
             A = TracingTensor("A", 0, "float")
             Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 8) as i:
+            with enigma.for_range(0, 8):
                 Out[tid] = A[tid]
 
         top_types = [op.op_type for op in b.ops]
@@ -157,7 +157,6 @@ class TestWhile(unittest.TestCase):
         b = _make_builder("A", "Out")
         with b:
             A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             i = enigma.metal_cast(0, "int")
             n = enigma.metal_cast(10, "int")
@@ -200,10 +199,9 @@ class TestNestedControlFlow(unittest.TestCase):
         b = _make_builder("A", "Out")
         with b:
             A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 4) as i:
-                with enigma.for_range(0, 4) as j:
+            with enigma.for_range(0, 4):
+                with enigma.for_range(0, 4):
                     _ = A[tid]
 
         for_ops = [op for op in b.ops if op.op_type == "scf_for"]
@@ -219,9 +217,9 @@ class TestNestedControlFlow(unittest.TestCase):
             A = TracingTensor("A", 0, "float")
             Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 4) as i:
+            with enigma.for_range(0, 4):
                 _ = A[tid]
-            with enigma.for_range(0, 8) as j:
+            with enigma.for_range(0, 8):
                 Out[tid] = A[tid]
 
         for_ops = [op for op in b.ops if op.op_type == "scf_for"]
@@ -258,7 +256,7 @@ class TestRegionStack(unittest.TestCase):
         with b:
             A = TracingTensor("A", 0, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 4) as i:
+            with enigma.for_range(0, 4):
                 _ = A[tid]
         self.assertEqual(len(b._region_stack), 1)
         self.assertIs(b._region_stack[0], b.ops)
@@ -270,7 +268,7 @@ class TestRegionStack(unittest.TestCase):
             A = TracingTensor("A", 0, "float")
             Out = TracingTensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
-            with enigma.for_range(0, 4) as i:
+            with enigma.for_range(0, 4):
                 _ = A[tid]
             # This store should be at top level, not inside the for
             Out[tid] = A[tid]

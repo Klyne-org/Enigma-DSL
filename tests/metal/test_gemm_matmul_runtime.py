@@ -1,14 +1,10 @@
-"""End-to-end tests for GEMM and matmul kernels.
-
-Tests matrix multiply (C = A*B) and GEMM accumulate (C += A*B) using
-2D grid indexing and float4 dot products for fixed K=4 inner dimension.
-"""
+"""Runtime tests for GEMM and matmul kernels."""
 
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import numpy as np
 
@@ -61,33 +57,10 @@ def gemm_k4(A: enigma.f32, B: enigma.f32, C: enigma.f32):
     C[out_idx] = enigma.dot(avec, bvec) + C[out_idx]
 
 
-class TestMatMul(unittest.TestCase):
+class TestMatMulCompile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.compiled = enigma.compile(matmul_k4)
-        cls.runtime = enigma.MetalRuntime()
-
-    def _run_matmul(self, M):
-        A = np.random.randn(M, K_DIM).astype(np.float32)
-        B = np.random.randn(K_DIM, N_DIM).astype(np.float32)
-        raw = self.runtime.execute(
-            self.compiled,
-            [A.ravel(), B.ravel()],
-            M * N_DIM * 4,
-            grid=(N_DIM, M, 1),
-            threads=(min(N_DIM, 16), min(M, 16), 1),
-        )
-        out = np.frombuffer(raw, dtype=np.float32).copy().reshape(M, N_DIM)
-        np.testing.assert_allclose(out, A @ B, rtol=1e-4, atol=1e-4)
-
-    def test_small(self):
-        self._run_matmul(4)
-
-    def test_medium(self):
-        self._run_matmul(32)
-
-    def test_large(self):
-        self._run_matmul(128)
 
     def test_metal_source_has_dot(self):
         self.assertIn("dot(", self.compiled.metal_source)
@@ -101,34 +74,10 @@ class TestMatMul(unittest.TestCase):
         self.assertIn("_tpg.x", src)
 
 
-class TestGEMM(unittest.TestCase):
+class TestGEMMCompile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.compiled = enigma.compile(gemm_k4)
-        cls.runtime = enigma.MetalRuntime()
-
-    def _run_gemm(self, M):
-        A = np.random.randn(M, K_DIM).astype(np.float32)
-        B = np.random.randn(K_DIM, N_DIM).astype(np.float32)
-        raw = self.runtime.execute(
-            self.compiled,
-            [A.ravel(), B.ravel()],
-            M * N_DIM * 4,
-            grid=(N_DIM, M, 1),
-            threads=(min(N_DIM, 16), min(M, 16), 1),
-        )
-        out = np.frombuffer(raw, dtype=np.float32).copy().reshape(M, N_DIM)
-        expected = A @ B
-        np.testing.assert_allclose(out, expected, rtol=1e-4, atol=1e-4)
-
-    def test_small(self):
-        self._run_gemm(4)
-
-    def test_medium(self):
-        self._run_gemm(32)
-
-    def test_large(self):
-        self._run_gemm(128)
 
     def test_metal_source_has_accumulate(self):
         src = self.compiled.metal_source
@@ -136,8 +85,6 @@ class TestGEMM(unittest.TestCase):
 
 
 class TestSimdgroupMatrixOpsMLIR(unittest.TestCase):
-    """Test that simdgroup matrix ops trace and emit valid MLIR."""
-
     def test_simdgroup_gemm_traces(self):
         from enigma.compiler.kernel import trace_kernel
         from enigma.compiler.mlir_emitter import emit_mlir
@@ -164,6 +111,65 @@ class TestSimdgroupMatrixOpsMLIR(unittest.TestCase):
         self.assertIn("enigma.simdgroup_multiply_accumulate", mlir)
         self.assertIn("enigma.make_filled_simdgroup_matrix", mlir)
         self.assertIn("vector<8x8xf32>", mlir)
+
+
+class TestMatMulRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiled = enigma.compile(matmul_k4)
+        cls.runtime = enigma.MetalRuntime()
+
+    def _run_matmul(self, m):
+        a = np.random.randn(m, K_DIM).astype(np.float32)
+        b = np.random.randn(K_DIM, N_DIM).astype(np.float32)
+        raw = self.runtime.execute(
+            self.compiled,
+            [a.ravel(), b.ravel()],
+            m * N_DIM * 4,
+            grid=(N_DIM, m, 1),
+            threads=(min(N_DIM, 16), min(m, 16), 1),
+        )
+        out = np.frombuffer(raw, dtype=np.float32).copy().reshape(m, N_DIM)
+        np.testing.assert_allclose(out, a @ b, rtol=1e-4, atol=1e-4)
+
+    def test_small(self):
+        self._run_matmul(4)
+
+    def test_medium(self):
+        self._run_matmul(32)
+
+    def test_large(self):
+        self._run_matmul(128)
+
+
+class TestGEMMRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiled = enigma.compile(gemm_k4)
+        cls.runtime = enigma.MetalRuntime()
+
+    def _run_gemm(self, m):
+        a = np.random.randn(m, K_DIM).astype(np.float32)
+        b = np.random.randn(K_DIM, N_DIM).astype(np.float32)
+        raw = self.runtime.execute(
+            self.compiled,
+            [a.ravel(), b.ravel()],
+            m * N_DIM * 4,
+            grid=(N_DIM, m, 1),
+            threads=(min(N_DIM, 16), min(m, 16), 1),
+        )
+        out = np.frombuffer(raw, dtype=np.float32).copy().reshape(m, N_DIM)
+        expected = a @ b
+        np.testing.assert_allclose(out, expected, rtol=1e-4, atol=1e-4)
+
+    def test_small(self):
+        self._run_gemm(4)
+
+    def test_medium(self):
+        self._run_gemm(32)
+
+    def test_large(self):
+        self._run_gemm(128)
 
 
 if __name__ == "__main__":
