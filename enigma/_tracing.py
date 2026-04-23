@@ -37,40 +37,34 @@ class IRValue:
     def __add__(self, other) -> IRValue:
         if isinstance(other, int) and other == 0:
             return self
-        if (
-            isinstance(other, IRValue)
-            and self._tv_groups is not None
-            and other._tv_groups is not None
-        ):
-            return _tv_binop("tv_add", self, other)
-        return _binop("add", self, other)
+        return _tv_aware_binop("add", "tv_add", self, other)
 
     def __radd__(self, other) -> IRValue:
         if isinstance(other, int) and other == 0:
             return self
-        return _binop("add", other, self)
+        return _tv_aware_binop("add", "tv_add", other, self)
 
     def __sub__(self, other) -> IRValue:
-        return _binop("sub", self, other)
+        return _tv_aware_binop("sub", "tv_sub", self, other)
 
     def __rsub__(self, other) -> IRValue:
-        return _binop("sub", other, self)
+        return _tv_aware_binop("sub", "tv_sub", other, self)
 
     def __mul__(self, other) -> IRValue:
         if isinstance(other, int) and other == 1:
             return self
-        return _binop("mul", self, other)
+        return _tv_aware_binop("mul", "tv_mul", self, other)
 
     def __rmul__(self, other) -> IRValue:
         if isinstance(other, int) and other == 1:
             return self
-        return _binop("mul", other, self)
+        return _tv_aware_binop("mul", "tv_mul", other, self)
 
     def __truediv__(self, other) -> IRValue:
-        return _binop("div", self, other)
+        return _tv_aware_binop("div", "tv_div", self, other)
 
     def __floordiv__(self, other) -> IRValue:
-        return _binop("div", self, other)
+        return _tv_aware_binop("div", "tv_div", self, other)
 
     def __mod__(self, other) -> IRValue:
         return _binop("mod", self, other)
@@ -655,8 +649,26 @@ def _vec_binop(op_type: str, a: IRValue, b: IRValue) -> IRValue:
     builder.record(IROp(op_type, result, [a, b]))
     return result
 
+def _tv_aware_binop(scalar_op: str, tv_op: str, lhs, rhs) -> IRValue:
+    """Route to TV or scalar binop: TV×TV, TV×scalar (broadcast), or scalar×scalar."""
+    builder = get_builder()
+    assert builder is not None
+    lhs, rhs = _ensure_ir(lhs), _ensure_ir(rhs)
+
+    l_tv = isinstance(lhs, IRValue) and lhs._tv_groups is not None
+    r_tv = isinstance(rhs, IRValue) and rhs._tv_groups is not None
+
+    if l_tv and r_tv:
+        return _tv_binop(tv_op, lhs, rhs)
+    if l_tv and not r_tv:
+        return _tv_scalar_binop(tv_op, lhs, rhs)
+    if not l_tv and r_tv:
+        return _tv_scalar_binop(tv_op, rhs, lhs, scalar_on_left=True)
+    return _binop(scalar_op, lhs, rhs)
+
+
 def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
-    """Binary op on TV-vectorized values, preserving group structure."""
+    """Binary op on two TV-grouped values, preserving group structure."""
     builder = get_builder()
     assert builder is not None
     result = builder.new_value(lhs.dtype)
@@ -669,6 +681,31 @@ def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
             attrs={
                 "groups": lhs._tv_groups,
                 "dtype": lhs.dtype,
+            },
+        )
+    )
+    return result
+
+
+def _tv_scalar_binop(
+    op_type: str, tv_val: IRValue, scalar_val: IRValue,
+    scalar_on_left: bool = False,
+) -> IRValue:
+    """TV × scalar broadcast. scalar_on_left=True for scalar OP tv (e.g. scalar / tv)."""
+    builder = get_builder()
+    assert builder is not None
+    result = builder.new_value(tv_val.dtype)
+    result._tv_groups = tv_val._tv_groups
+    builder.record(
+        IROp(
+            op_type,
+            result,
+            [tv_val, scalar_val],
+            attrs={
+                "groups": tv_val._tv_groups,
+                "dtype": tv_val.dtype,
+                "broadcast_scalar": True,
+                "scalar_on_left": scalar_on_left,
             },
         )
     )
