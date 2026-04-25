@@ -2,14 +2,14 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import numpy as np
 
 import enigma
 
 
-class TestVectorAdd(unittest.TestCase):
+class TestVectorAddCompile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         @enigma.kernel
@@ -18,30 +18,6 @@ class TestVectorAdd(unittest.TestCase):
             C[tid] = A[tid] + B[tid]
 
         cls.compiled = enigma.compile(vector_add)
-        cls.runtime = enigma.MetalRuntime()
-
-    def _run_vector_add(self, N):
-        A = np.random.randn(N).astype(np.float32)
-        B = np.random.randn(N).astype(np.float32)
-        result = np.frombuffer(
-            self.runtime.execute(
-                self.compiled, [A, B], N * 4, grid=(N, 1, 1), threads=(min(N, 256), 1, 1)
-            ),
-            dtype=np.float32,
-        )
-        np.testing.assert_allclose(result, A + B, rtol=1e-5, atol=1e-7)
-
-    def test_small(self):
-        self._run_vector_add(4)
-
-    def test_single_threadgroup(self):
-        self._run_vector_add(256)
-
-    def test_multiple_threadgroups(self):
-        self._run_vector_add(1024)
-
-    def test_large(self):
-        self._run_vector_add(65536)
 
     def test_metal_source_generation(self):
         src = self.compiled.metal_source
@@ -52,24 +28,7 @@ class TestVectorAdd(unittest.TestCase):
         self.assertIn("[[thread_position_in_grid]]", src)
 
 
-class TestTracingIR(unittest.TestCase):
-    def test_trace_records_ops(self):
-        from enigma.compiler.kernel import trace_kernel
-
-        @enigma.kernel
-        def add_kernel(X: enigma.f32, Y: enigma.f32, Z: enigma.f32):
-            tid = enigma.thread_position_in_grid
-            Z[tid] = X[tid] + Y[tid]
-
-        builder = trace_kernel(add_kernel)
-        op_types = [op.op_type for op in builder.ops]
-        self.assertIn("thread_position_in_grid", op_types)
-        self.assertIn("load", op_types)
-        self.assertIn("add", op_types)
-        self.assertIn("store", op_types)
-        self.assertEqual(builder.kernel_name, "add_kernel")
-        self.assertEqual(len(builder.args), 3)
-
+class TestTracingCompile(unittest.TestCase):
     def test_metal_emission(self):
         from enigma.compiler.kernel import trace_kernel
         from enigma.compiler.mlir_emitter import emit_msl
@@ -132,6 +91,41 @@ class TestExportMetal(unittest.TestCase):
         self.assertTrue(os.path.exists(metal_path))
         with open(metal_path) as f:
             self.assertIn("kernel void kept", f.read())
+
+
+class TestVectorAddRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        @enigma.kernel
+        def vector_add(A: enigma.f32, B: enigma.f32, C: enigma.f32):
+            tid = enigma.thread_position_in_grid
+            C[tid] = A[tid] + B[tid]
+
+        cls.compiled = enigma.compile(vector_add)
+        cls.runtime = enigma.MetalRuntime()
+
+    def _run_vector_add(self, n):
+        a = np.random.randn(n).astype(np.float32)
+        b = np.random.randn(n).astype(np.float32)
+        result = np.frombuffer(
+            self.runtime.execute(
+                self.compiled, [a, b], n * 4, grid=(n, 1, 1), threads=(min(n, 256), 1, 1)
+            ),
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(result, a + b, rtol=1e-5, atol=1e-7)
+
+    def test_small(self):
+        self._run_vector_add(4)
+
+    def test_single_threadgroup(self):
+        self._run_vector_add(256)
+
+    def test_multiple_threadgroups(self):
+        self._run_vector_add(1024)
+
+    def test_large(self):
+        self._run_vector_add(65536)
 
 
 if __name__ == "__main__":
