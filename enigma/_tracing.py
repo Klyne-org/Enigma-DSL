@@ -37,43 +37,37 @@ class IRValue:
     def __add__(self, other) -> IRValue:
         if isinstance(other, int) and other == 0:
             return self
-        if (
-            isinstance(other, IRValue)
-            and self._tv_groups is not None
-            and other._tv_groups is not None
-        ):
-            return _tv_binop("tv_add", self, other)
-        return _binop("add", self, other)
+        return _tv_aware_binop("add", "tv_add", self, other)
 
     def __radd__(self, other) -> IRValue:
         if isinstance(other, int) and other == 0:
             return self
-        return _binop("add", other, self)
+        return _tv_aware_binop("add", "tv_add", other, self)
 
     def __sub__(self, other) -> IRValue:
-        return _binop("sub", self, other)
+        return _tv_aware_binop("sub", "tv_sub", self, other)
 
     def __rsub__(self, other) -> IRValue:
-        return _binop("sub", other, self)
+        return _tv_aware_binop("sub", "tv_sub", other, self)
 
     def __mul__(self, other) -> IRValue:
         if isinstance(other, int) and other == 1:
             return self
-        return _binop("mul", self, other)
+        return _tv_aware_binop("mul", "tv_mul", self, other)
 
     def __rmul__(self, other) -> IRValue:
         if isinstance(other, int) and other == 1:
             return self
-        return _binop("mul", other, self)
+        return _tv_aware_binop("mul", "tv_mul", other, self)
 
     def __truediv__(self, other) -> IRValue:
-        return _binop("div", self, other)
+        return _tv_aware_binop("div", "tv_div", self, other)
 
     def __floordiv__(self, other) -> IRValue:
-        return _binop("div", self, other)
+        return _tv_aware_binop("div", "tv_div", self, other)
 
     def __mod__(self, other) -> IRValue:
-        return _binop("mod", self, other)
+        return _tv_aware_binop("mod", "tv_mod", self, other)
 
     def __neg__(self) -> IRValue:
         builder = get_builder()
@@ -655,8 +649,26 @@ def _vec_binop(op_type: str, a: IRValue, b: IRValue) -> IRValue:
     builder.record(IROp(op_type, result, [a, b]))
     return result
 
+def _tv_aware_binop(scalar_op: str, tv_op: str, lhs, rhs) -> IRValue:
+    """Route to TV or scalar binop: TV×TV, TV×scalar (broadcast), or scalar×scalar."""
+    builder = get_builder()
+    assert builder is not None
+    lhs, rhs = _ensure_ir(lhs), _ensure_ir(rhs)
+
+    l_tv = isinstance(lhs, IRValue) and lhs._tv_groups is not None
+    r_tv = isinstance(rhs, IRValue) and rhs._tv_groups is not None
+
+    if l_tv and r_tv:
+        return _tv_binop(tv_op, lhs, rhs)
+    if l_tv and not r_tv:
+        return _tv_scalar_binop(tv_op, lhs, rhs)
+    if not l_tv and r_tv:
+        return _tv_scalar_binop(tv_op, rhs, lhs, scalar_on_left=True)
+    return _binop(scalar_op, lhs, rhs)
+
+
 def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
-    """Binary op on TV-vectorized values, preserving group structure."""
+    """Binary op on two TV-grouped values, preserving group structure."""
     builder = get_builder()
     assert builder is not None
     result = builder.new_value(lhs.dtype)
@@ -675,6 +687,31 @@ def _tv_binop(op_type: str, lhs: IRValue, rhs: IRValue) -> IRValue:
     return result
 
 
+def _tv_scalar_binop(
+    op_type: str, tv_val: IRValue, scalar_val: IRValue,
+    scalar_on_left: bool = False,
+) -> IRValue:
+    """TV × scalar broadcast. scalar_on_left=True for scalar OP tv (e.g. scalar / tv)."""
+    builder = get_builder()
+    assert builder is not None
+    result = builder.new_value(tv_val.dtype)
+    result._tv_groups = tv_val._tv_groups
+    builder.record(
+        IROp(
+            op_type,
+            result,
+            [tv_val, scalar_val],
+            attrs={
+                "groups": tv_val._tv_groups,
+                "dtype": tv_val.dtype,
+                "broadcast_scalar": True,
+                "scalar_on_left": scalar_on_left,
+            },
+        )
+    )
+    return result
+
+
 @dataclass
 class IROp:
     op_type: str
@@ -684,90 +721,10 @@ class IROp:
     regions: List[List["IROp"]] = field(default_factory=list)
 
 
-class TracingTensor:
-    """Proxy tensor for naive kernel tracing (flat 1D indexing).
-
-    ``address_space`` is "device" for kernel-arg buffers and "threadgroup"
-    for buffers returned by ``threadgroup_alloc``. ``shape`` is None for
-    device buffers (dynamic) and an int for threadgroup allocs (static).
-    """
-
-    def __init__(
-        self,
-        name: str,
-        buffer_index: int,
-        metal_dtype: str,
-        address_space: str = "device",
-        shape: Optional[int] = None,
-    ):
-        self.name = name
-        self.buffer_index = buffer_index
-        self.metal_dtype = metal_dtype
-        self.address_space = address_space
-        self.shape = shape
-
-    def _attrs(self) -> Dict[str, Any]:
-        return {
-            "buffer": self.name,
-            "buffer_index": self.buffer_index,
-            "address_space": self.address_space,
-            "dtype": self.metal_dtype,
-            "shape": self.shape,
-        }
-
-    def __getitem__(self, index) -> IRValue:
-        builder = get_builder()
-        assert builder is not None
-        index = _ensure_ir(index)
-        result = builder.new_value(self.metal_dtype)
-        builder.record(IROp("load", result, [index], attrs=self._attrs()))
-        return result
-
-    def __setitem__(self, index, value: IRValue) -> None:
-        builder = get_builder()
-        assert builder is not None
-        index = _ensure_ir(index)
-        builder.record(IROp("store", None, [index, value], attrs=self._attrs()))
-
-    # --- Atomics (method-style) ---
-    def atomic_load(self, index, order: str = "relaxed") -> IRValue:
-        return _atomic_load(self, index, order)
-
-    def atomic_store(self, index, value, order: str = "relaxed") -> None:
-        _atomic_store(self, index, value, order)
-
-    def atomic_exchange(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_exchange", self, index, value, order)
-
-    def atomic_fetch_add(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_add", self, index, value, order)
-
-    def atomic_fetch_sub(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_sub", self, index, value, order)
-
-    def atomic_fetch_min(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_min", self, index, value, order)
-
-    def atomic_fetch_max(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_max", self, index, value, order)
-
-    def atomic_fetch_and(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_and", self, index, value, order)
-
-    def atomic_fetch_or(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_or", self, index, value, order)
-
-    def atomic_fetch_xor(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_xor", self, index, value, order)
-
-    def atomic_compare_exchange_weak(
-        self, index, expected, desired,
-        success_order: str = "relaxed", failure_order: str = "relaxed",
-    ) -> IRValue:
-        return _atomic_cas(self, index, expected, desired, success_order, failure_order)
+from .tensor import Tensor as TracingTensor  # backward compat alias
 
 
-# --- Atomic helpers (free functions + TracingTensor methods use these) ---
+# --- Atomic helpers (free functions + Tensor methods use these) ---
 
 def _atomic_load(buf: "TracingTensor", index, order: str) -> IRValue:
     builder = get_builder()
