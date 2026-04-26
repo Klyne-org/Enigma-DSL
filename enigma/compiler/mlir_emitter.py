@@ -347,9 +347,13 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                                    "mul": arith.MulFOp, "div": arith.DivFOp,
                                    "mod": arith.RemFOp}[t]
                         else:
+                            traced_dt = op.result.dtype if op.result else ""
+                            is_uint = (traced_dt in ("uint", "uint32", "ushort", "uchar")
+                                       and ty_str != "index")
                             cls = {"add": arith.AddIOp, "sub": arith.SubIOp,
-                                   "mul": arith.MulIOp, "div": arith.DivSIOp,
-                                   "mod": arith.RemSIOp}[t]
+                                   "mul": arith.MulIOp,
+                                   "div": arith.DivUIOp if is_uint else arith.DivSIOp,
+                                   "mod": arith.RemUIOp if is_uint else arith.RemSIOp}[t]
                         ssa[op.result.name] = cls(a, b).result
 
                     elif t in _UNARY_MATH:
@@ -417,11 +421,28 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                             elems = tv_elems[a_name]
                             ty_str = str(elems[0].type)
                             is_float = ty_str in ("f32", "f16", "bf16")
-                            add_cls = arith.AddFOp if is_float else arith.AddIOp
-                            acc = elems[0]
-                            for e in elems[1:]:
-                                acc = add_cls(acc, e).result
-                            ssa[op.result.name] = _SIMD_UNARY[t](acc).result
+
+                            _TV_REDUCE_CLS = {
+                                "simd_sum":     arith.AddFOp if is_float else arith.AddIOp,
+                                "simd_product": arith.MulFOp if is_float else arith.MulIOp,
+                                "simd_min":     en.FminOp if is_float else en.IMinOp,
+                                "simd_max":     en.FmaxOp if is_float else en.IMaxOp,
+                                "simd_and":     arith.AndIOp,
+                                "simd_or":      arith.OrIOp,
+                                "simd_xor":     arith.XOrIOp,
+                            }
+
+                            if t in _TV_REDUCE_CLS:
+                                reduce_cls = _TV_REDUCE_CLS[t]
+                                acc = elems[0]
+                                for e in elems[1:]:
+                                    acc = reduce_cls(acc, e).result
+                                ssa[op.result.name] = _SIMD_UNARY[t](acc).result
+                            else:
+                                out = [_SIMD_UNARY[t](e).result for e in elems]
+                                tv_elems[op.result.name] = out
+                                if out:
+                                    ssa[op.result.name] = out[0]
                         else:
                             a = ssa[a_name]
                             ssa[op.result.name] = _SIMD_UNARY[t](a).result
@@ -605,6 +626,17 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         base_idx = _resolve_base(base)
                         loaded = []
 
+                        from .._tracing import IRValue as _IRV
+                        base_align = 1
+                        if isinstance(base, _IRV) and base._tv_groups is None:
+                            total = sum(c for _, c in groups)
+                            if total >= 4 and all(s % 4 == 0 and c % 4 == 0
+                                                  for s, c in groups):
+                                base_align = 4
+                            elif total >= 2 and all(s % 2 == 0 and c % 2 == 0
+                                                    for s, c in groups):
+                                base_align = 2
+
                         _vec_casts = {}
                         def _get_vec_buf(width):
                             if width not in _vec_casts:
@@ -620,27 +652,18 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                             while pos < count:
                                 off = start + pos
                                 remaining = count - pos
-                                if remaining >= 4 and off % 4 == 0:
+                                vw = 1
+                                if remaining >= 4 and off % 4 == 0 and base_align >= 4:
                                     vw = 4
-                                elif remaining >= 2 and off % 2 == 0:
+                                elif remaining >= 2 and off % 2 == 0 and base_align >= 2:
                                     vw = 2
-                                else:
-                                    vw = 1
 
                                 if vw > 1:
                                     vec_buf = _get_vec_buf(vw)
-                                    vec_idx = _const_index(off // vw)
-                                    if off > 0:
-                                        base_div = arith.DivSIOp(
-                                            base_idx,
-                                            _const_index(vw)).result
-                                        vec_idx = arith.AddIOp(
-                                            base_div,
-                                            _const_index(off // vw)).result
-                                    else:
-                                        vec_idx = arith.DivSIOp(
-                                            base_idx,
-                                            _const_index(vw)).result
+                                    abs_idx = base_idx if off == 0 else \
+                                        arith.AddIOp(base_idx, _const_index(off)).result
+                                    vec_idx = arith.DivSIOp(
+                                        abs_idx, _const_index(vw)).result
                                     vec_val = memref.LoadOp(
                                         vec_buf, [vec_idx]).result
                                     for lane in range(vw):
@@ -665,17 +688,20 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         if loaded:
                             ssa[op.result.name] = loaded[0]
 
-                    elif t in ("tv_add", "tv_sub", "tv_mul", "tv_div"):
+                    elif t in ("tv_add", "tv_sub", "tv_mul", "tv_div", "tv_mod"):
                         is_broadcast = op.attrs.get("broadcast_scalar", False)
                         scalar_on_left = op.attrs.get("scalar_on_left", False)
                         a_elems = tv_elems[op.operands[0].name]
                         ty_str = str(a_elems[0].type)
                         is_float = ty_str in ("f32", "f16", "bf16")
+                        traced_dtype = op.attrs.get("dtype", "")
+                        is_unsigned = traced_dtype in ("uint", "uint32", "ushort", "uchar")
                         _arith_cls = {
                             "tv_add": arith.AddFOp if is_float else arith.AddIOp,
                             "tv_sub": arith.SubFOp if is_float else arith.SubIOp,
                             "tv_mul": arith.MulFOp if is_float else arith.MulIOp,
-                            "tv_div": arith.DivFOp if is_float else arith.DivSIOp,
+                            "tv_div": arith.DivFOp if is_float else (arith.DivUIOp if is_unsigned else arith.DivSIOp),
+                            "tv_mod": arith.RemFOp if is_float else (arith.RemUIOp if is_unsigned else arith.RemSIOp),
                         }[t]
                         if is_broadcast:
                             scalar_v = ssa[op.operands[1].name]
@@ -705,6 +731,17 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         base_idx = _resolve_base(base)
                         elem_t = val_elems[0].type if val_elems else _elem_type("float")
 
+                        base_align_st = 1
+                        from .._tracing import IRValue as _IRV2
+                        if isinstance(base, _IRV2) and base._tv_groups is None:
+                            total = sum(c for _, c in groups)
+                            if total >= 4 and all(s % 4 == 0 and c % 4 == 0
+                                                  for s, c in groups):
+                                base_align_st = 4
+                            elif total >= 2 and all(s % 2 == 0 and c % 2 == 0
+                                                    for s, c in groups):
+                                base_align_st = 2
+
                         _vec_casts_st = {}
                         def _get_vec_buf_st(width):
                             if width not in _vec_casts_st:
@@ -721,27 +758,18 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                             while pos < count:
                                 off = start + pos
                                 remaining = count - pos
-                                if remaining >= 4 and off % 4 == 0:
+                                vw = 1
+                                if remaining >= 4 and off % 4 == 0 and base_align_st >= 4:
                                     vw = 4
-                                elif remaining >= 2 and off % 2 == 0:
+                                elif remaining >= 2 and off % 2 == 0 and base_align_st >= 2:
                                     vw = 2
-                                else:
-                                    vw = 1
 
                                 if vw > 1:
                                     vec_buf = _get_vec_buf_st(vw)
-                                    if off > 0:
-                                        base_div = arith.DivSIOp(
-                                            base_idx,
-                                            _const_index(vw)).result
-                                        vec_idx = arith.AddIOp(
-                                            base_div,
-                                            _const_index(off // vw)).result
-                                    else:
-                                        vec_idx = arith.DivSIOp(
-                                            base_idx,
-                                            _const_index(vw)).result
-                                    # Pack elements into vector
+                                    abs_idx = base_idx if off == 0 else \
+                                        arith.AddIOp(base_idx, _const_index(off)).result
+                                    vec_idx = arith.DivSIOp(
+                                            abs_idx, _const_index(vw)).result
                                     vec_t = ir.VectorType.get([vw], elem_t)
                                     elems = val_elems[i:i+vw]
                                     vec_val = en.VecMakeOp(

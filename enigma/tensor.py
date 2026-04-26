@@ -10,16 +10,24 @@ from .tuple import flatten, idx2crd, is_int, is_tuple, product
 
 
 class Tensor:
-    """A tensor: buffer name + layout + base offset (int or IRValue)."""
+    """Unified tensor: buffer name + layout + base offset.
+
+    Handles both layout algebra (slicing, TV composition) and direct IR
+    tracing (scalar load/store, atomics, threadgroup memory).
+    """
 
     def __init__(
-        self, name: str, buffer_index: int, metal_dtype: str, layout: Layout, base_offset: Any = 0
+        self, name: str, buffer_index: int, metal_dtype: str,
+        layout: "Layout | None" = None, base_offset: Any = 0,
+        address_space: str = "device", shape: "int | None" = None,
     ):
         self.name = name
         self.buffer_index = buffer_index
         self.metal_dtype = metal_dtype
         self.layout = layout
         self.base_offset = base_offset
+        self.address_space = address_space
+        self._static_shape = shape  # for threadgroup alloc (static size)
 
     @property
     def shape(self):
@@ -34,14 +42,35 @@ class Tensor:
         return self.metal_dtype
 
     def size(self, mode=None):
+        if self.layout is None:
+            return self._static_shape or 0
         return self.layout.size(mode)
 
+    def _attrs(self):
+        return {
+            "buffer": self.name,
+            "buffer_index": self.buffer_index,
+            "address_space": self.address_space,
+            "dtype": self.metal_dtype,
+            "shape": self._static_shape,
+        }
+
     def __getitem__(self, coord):
-        """Hierarchical slicing: None=keep, int=static fix, IRValue=runtime fix."""
-        from ._tracing import IRValue
+        """Indexing: single IRValue → scalar load, tuple with None → layout slice."""
+        from ._tracing import IRValue, IROp, get_builder, _ensure_ir
 
         if not isinstance(coord, tuple):
+            if isinstance(coord, IRValue) or isinstance(coord, int):
+                idx = _ensure_ir(coord)
+                builder = get_builder()
+                assert builder is not None
+                result = builder.new_value(self.metal_dtype)
+                builder.record(IROp("load", result, [idx], attrs=self._attrs()))
+                return result
             coord = (coord,)
+
+        if self.layout is None:
+            raise TypeError("Layout algebra requires a Layout on the Tensor")
 
         shape = self.layout.shape if is_tuple(self.layout.shape) else (self.layout.shape,)
         stride = self.layout.stride if is_tuple(self.layout.stride) else (self.layout.stride,)
@@ -88,25 +117,19 @@ class Tensor:
             self.metal_dtype,
             Layout(new_shape, new_stride),
             base_offset=offset,
+            address_space=self.address_space,
         )
 
     def __setitem__(self, coord, value):
-        """Simple 1D store for naive kernels."""
-        from ._tracing import IROp, IRValue, get_builder
+        from ._tracing import IROp, IRValue, get_builder, _ensure_ir
 
         if not isinstance(coord, tuple):
             coord = (coord,)
-        if len(coord) == 1 and isinstance(coord[0], IRValue):
+        if len(coord) == 1 and (isinstance(coord[0], IRValue) or isinstance(coord[0], int)):
+            idx = _ensure_ir(coord[0])
             builder = get_builder()
             assert builder is not None
-            builder.record(
-                IROp(
-                    "store",
-                    None,
-                    [coord[0], value],
-                    attrs={"buffer": self.name, "buffer_index": self.buffer_index},
-                )
-            )
+            builder.record(IROp("store", None, [idx, value], attrs=self._attrs()))
             return
         raise TypeError("Use .store() for TV-layout kernels")
 
@@ -169,6 +192,52 @@ class Tensor:
 
     def __repr__(self):
         return f"Tensor({self.name}, layout={self.layout}, offset={self.base_offset})"
+
+    # --- Atomics (delegate to _tracing helpers) ---
+    def atomic_load(self, index, order="relaxed"):
+        from ._tracing import _atomic_load
+        return _atomic_load(self, index, order)
+
+    def atomic_store(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_store
+        _atomic_store(self, index, value, order)
+
+    def atomic_exchange(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_exchange", self, index, value, order)
+
+    def atomic_fetch_add(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_add", self, index, value, order)
+
+    def atomic_fetch_sub(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_sub", self, index, value, order)
+
+    def atomic_fetch_min(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_min", self, index, value, order)
+
+    def atomic_fetch_max(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_max", self, index, value, order)
+
+    def atomic_fetch_and(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_and", self, index, value, order)
+
+    def atomic_fetch_or(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_or", self, index, value, order)
+
+    def atomic_fetch_xor(self, index, value, order="relaxed"):
+        from ._tracing import _atomic_rmw
+        return _atomic_rmw("atomic_fetch_xor", self, index, value, order)
+
+    def atomic_compare_exchange_weak(self, index, expected, desired,
+                                     success_order="relaxed", failure_order="relaxed"):
+        from ._tracing import _atomic_cas
+        return _atomic_cas(self, index, expected, desired, success_order, failure_order)
 
 
 def tensor_composition(tensor: Tensor, tv_layout: Layout, tiler) -> Tensor:

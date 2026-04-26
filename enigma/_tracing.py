@@ -67,7 +67,7 @@ class IRValue:
         return _tv_aware_binop("div", "tv_div", self, other)
 
     def __mod__(self, other) -> IRValue:
-        return _binop("mod", self, other)
+        return _tv_aware_binop("mod", "tv_mod", self, other)
 
     def __neg__(self) -> IRValue:
         builder = get_builder()
@@ -721,90 +721,10 @@ class IROp:
     regions: List[List["IROp"]] = field(default_factory=list)
 
 
-class TracingTensor:
-    """Proxy tensor for naive kernel tracing (flat 1D indexing).
-
-    ``address_space`` is "device" for kernel-arg buffers and "threadgroup"
-    for buffers returned by ``threadgroup_alloc``. ``shape`` is None for
-    device buffers (dynamic) and an int for threadgroup allocs (static).
-    """
-
-    def __init__(
-        self,
-        name: str,
-        buffer_index: int,
-        metal_dtype: str,
-        address_space: str = "device",
-        shape: Optional[int] = None,
-    ):
-        self.name = name
-        self.buffer_index = buffer_index
-        self.metal_dtype = metal_dtype
-        self.address_space = address_space
-        self.shape = shape
-
-    def _attrs(self) -> Dict[str, Any]:
-        return {
-            "buffer": self.name,
-            "buffer_index": self.buffer_index,
-            "address_space": self.address_space,
-            "dtype": self.metal_dtype,
-            "shape": self.shape,
-        }
-
-    def __getitem__(self, index) -> IRValue:
-        builder = get_builder()
-        assert builder is not None
-        index = _ensure_ir(index)
-        result = builder.new_value(self.metal_dtype)
-        builder.record(IROp("load", result, [index], attrs=self._attrs()))
-        return result
-
-    def __setitem__(self, index, value: IRValue) -> None:
-        builder = get_builder()
-        assert builder is not None
-        index = _ensure_ir(index)
-        builder.record(IROp("store", None, [index, value], attrs=self._attrs()))
-
-    # --- Atomics (method-style) ---
-    def atomic_load(self, index, order: str = "relaxed") -> IRValue:
-        return _atomic_load(self, index, order)
-
-    def atomic_store(self, index, value, order: str = "relaxed") -> None:
-        _atomic_store(self, index, value, order)
-
-    def atomic_exchange(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_exchange", self, index, value, order)
-
-    def atomic_fetch_add(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_add", self, index, value, order)
-
-    def atomic_fetch_sub(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_sub", self, index, value, order)
-
-    def atomic_fetch_min(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_min", self, index, value, order)
-
-    def atomic_fetch_max(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_max", self, index, value, order)
-
-    def atomic_fetch_and(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_and", self, index, value, order)
-
-    def atomic_fetch_or(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_or", self, index, value, order)
-
-    def atomic_fetch_xor(self, index, value, order: str = "relaxed") -> IRValue:
-        return _atomic_rmw("atomic_fetch_xor", self, index, value, order)
-
-    def atomic_compare_exchange_weak(
-        self, index, expected, desired,
-        success_order: str = "relaxed", failure_order: str = "relaxed",
-    ) -> IRValue:
-        return _atomic_cas(self, index, expected, desired, success_order, failure_order)
+from .tensor import Tensor as TracingTensor  # backward compat alias
 
 
-# --- Atomic helpers (free functions + TracingTensor methods use these) ---
+# --- Atomic helpers (free functions + Tensor methods use these) ---
 
 def _atomic_load(buf: "TracingTensor", index, order: str) -> IRValue:
     builder = get_builder()
