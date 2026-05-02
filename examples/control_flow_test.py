@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 
 import enigma
-from enigma._tracing import KernelBuilder, TracingTensor, IROp
+from enigma._tracing import KernelBuilder, Tensor, IROp
 
 # ============================================================================
 # Helper: walk all ops (including nested regions) and collect op types
@@ -73,8 +73,8 @@ builder = KernelBuilder("array_sum")
 builder.args.append(("A", 0, "float"))
 builder.args.append(("Out", 1, "float"))
 with builder:
-    A_proxy = TracingTensor("A", 0, "float")
-    Out_proxy = TracingTensor("Out", 1, "float")
+    A_proxy = Tensor("A", 0, "float")
+    Out_proxy = Tensor("Out", 1, "float")
     tid = enigma.thread_position_in_grid
     acc = enigma.metal_cast(0, "float")
     count = enigma.metal_cast(4, "int")
@@ -122,8 +122,8 @@ builder2 = KernelBuilder("clamp_kernel")
 builder2.args.append(("A", 0, "float"))
 builder2.args.append(("Out", 1, "float"))
 with builder2:
-    A_proxy = TracingTensor("A", 0, "float")
-    Out_proxy = TracingTensor("Out", 1, "float")
+    A_proxy = Tensor("A", 0, "float")
+    Out_proxy = Tensor("Out", 1, "float")
     tid = enigma.thread_position_in_grid
     val = A_proxy[tid]
     lo = enigma.metal_cast(0, "float")
@@ -175,8 +175,8 @@ builder3 = KernelBuilder("sum_positive")
 builder3.args.append(("A", 0, "float"))
 builder3.args.append(("Out", 1, "float"))
 with builder3:
-    A_proxy = TracingTensor("A", 0, "float")
-    Out_proxy = TracingTensor("Out", 1, "float")
+    A_proxy = Tensor("A", 0, "float")
+    Out_proxy = Tensor("Out", 1, "float")
     tid = enigma.thread_position_in_grid
     acc = enigma.metal_cast(0, "float")
     zero = enigma.metal_cast(0, "float")
@@ -226,9 +226,9 @@ builder4.args.append(("A", 0, "float"))
 builder4.args.append(("B", 1, "float"))
 builder4.args.append(("C", 2, "float"))
 with builder4:
-    A_proxy = TracingTensor("A", 0, "float")
-    B_proxy = TracingTensor("B", 1, "float")
-    C_proxy = TracingTensor("C", 2, "float")
+    A_proxy = Tensor("A", 0, "float")
+    B_proxy = Tensor("B", 1, "float")
+    C_proxy = Tensor("C", 2, "float")
     tid = enigma.thread_position_in_grid
     N_val = enigma.metal_cast(8, "int")
     K_val = enigma.metal_cast(K_SIZE, "int")
@@ -281,8 +281,8 @@ builder5 = KernelBuilder("while_search")
 builder5.args.append(("A", 0, "float"))
 builder5.args.append(("Out", 1, "float"))
 with builder5:
-    A_proxy = TracingTensor("A", 0, "float")
-    Out_proxy = TracingTensor("Out", 1, "float")
+    A_proxy = Tensor("A", 0, "float")
+    Out_proxy = Tensor("Out", 1, "float")
     tid = enigma.thread_position_in_grid
     i = enigma.metal_cast(0, "int")
     n = enigma.metal_cast(16, "int")

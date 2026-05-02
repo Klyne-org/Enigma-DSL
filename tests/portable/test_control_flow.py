@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import enigma
-from enigma._tracing import KernelBuilder, TracingTensor
+from enigma._tracing import KernelBuilder, Tensor
 
 
 def _make_builder(*bufs):
@@ -30,8 +30,8 @@ class TestForRange(unittest.TestCase):
         """for_range produces a scf_for op with a body region."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 10):
                 Out[tid] = A[tid]
@@ -47,7 +47,7 @@ class TestForRange(unittest.TestCase):
 
         b = _make_builder("A")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             with enigma.for_range(0, 4) as i:
                 _ = A[i]
             self.assertIsInstance(i, IRValue)
@@ -56,8 +56,8 @@ class TestForRange(unittest.TestCase):
         """Ops inside for_range body are nested, not in builder.ops."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 8):
                 Out[tid] = A[tid]
@@ -71,7 +71,7 @@ class TestForRange(unittest.TestCase):
         """for_range accepts IRValue bounds (not just ints)."""
         b = _make_builder("A")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             lo = enigma.metal_cast(0, "int")
             hi = enigma.metal_cast(10, "int")
             step = enigma.metal_cast(2, "int")
@@ -85,7 +85,7 @@ class TestForRange(unittest.TestCase):
         """for_range supports custom induction variable dtype."""
         b = _make_builder("A")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             with enigma.for_range(0, 10, dtype="uint") as i:
                 _ = A[i]
 
@@ -100,8 +100,8 @@ class TestIf(unittest.TestCase):
         """Simple if (no else) traces correctly."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             cond = enigma.cmp_gt(tid, 5)
             with enigma.if_(cond):
@@ -116,8 +116,8 @@ class TestIf(unittest.TestCase):
         """If/else traces both regions."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             val = A[tid]
             cond = enigma.cmp_gt(val, enigma.metal_cast(0, "float"))
@@ -138,8 +138,8 @@ class TestIf(unittest.TestCase):
         """Ops inside if_ body are nested, not in builder.ops."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             cond = enigma.cmp_gt(tid, 0)
             with enigma.if_(cond):
@@ -156,7 +156,7 @@ class TestWhile(unittest.TestCase):
         """while_ produces a scf_while op with before+after regions."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             tid = enigma.thread_position_in_grid
             i = enigma.metal_cast(0, "int")
             n = enigma.metal_cast(10, "int")
@@ -180,8 +180,8 @@ class TestNestedControlFlow(unittest.TestCase):
         """for_range containing an if_ nests correctly."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 8) as i:
                 cond = enigma.cmp_lt(i, 4)
@@ -198,7 +198,7 @@ class TestNestedControlFlow(unittest.TestCase):
         """Two levels of for_range nest correctly."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 4):
                 with enigma.for_range(0, 4):
@@ -214,8 +214,8 @@ class TestNestedControlFlow(unittest.TestCase):
         """Two sequential for_range ops at the same level."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 4):
                 _ = A[tid]
@@ -229,8 +229,8 @@ class TestNestedControlFlow(unittest.TestCase):
         """if_ inside while_ nests correctly."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             i = enigma.metal_cast(0, "int")
             n = enigma.metal_cast(10, "int")
@@ -254,7 +254,7 @@ class TestRegionStack(unittest.TestCase):
         """After tracing, region stack should be back to root."""
         b = _make_builder("A")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 4):
                 _ = A[tid]
@@ -265,8 +265,8 @@ class TestRegionStack(unittest.TestCase):
         """Ops recorded after a for_range go to the top level."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             with enigma.for_range(0, 4):
                 _ = A[tid]
