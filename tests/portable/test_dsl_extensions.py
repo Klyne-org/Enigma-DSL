@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tests for DSL extensions added after R1: Carry/iter_args, Scalar args,
 RegisterTensor, copy, load_if/store_if, Pipeline, capability queries.
 

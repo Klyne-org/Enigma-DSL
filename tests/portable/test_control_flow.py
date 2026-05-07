@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tests for control flow tracing (for_range, if_, while_).
 
 These tests verify the DSL-side tracing infrastructure only (no MLIR

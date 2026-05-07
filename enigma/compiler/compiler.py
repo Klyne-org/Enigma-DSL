@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Compilation pipeline: trace -> MLIR (enigma dialect) -> MSL -> metallib.
 
 The path is split in two stages:

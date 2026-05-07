@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Runtime tests for the metal-only DSL additions.
 
 These exercise the GPU side of the new features:

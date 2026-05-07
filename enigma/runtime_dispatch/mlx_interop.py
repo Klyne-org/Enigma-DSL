@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """MLX <-> Metal zero-copy interop.
 
 Apple Silicon's unified memory means an mlx.array's backing buffer is already

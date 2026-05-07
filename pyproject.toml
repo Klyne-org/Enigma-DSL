@@ -3,12 +3,25 @@ requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "enigma"
+name = "enigma-dsl"
 dynamic = ["version"]
 description = "A Python DSL for Apple Metal GPU kernels"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
+authors = [{ name = "Klyne Research" }]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: MacOS",
+  "Topic :: Software Development :: Compilers",
+  "Topic :: System :: Hardware",
+]
 dependencies = ["numpy"]
+
+[project.urls]
+Repository = "https://github.com/Klyne-Research/Enigma-DSL"
+Documentation = "https://github.com/Klyne-Research/Enigma-DSL/blob/main/docs/api-reference.md"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]

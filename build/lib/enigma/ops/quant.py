@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Pack / unpack helpers for low-bit quantization.
 
 Apple Metal does not have native ``fp8`` or ``fp4`` storage, and ``int4``

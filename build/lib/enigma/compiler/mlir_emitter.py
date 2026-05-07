@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Emit MLIR from traced IR using the Enigma dialect python bindings,
 then translate to MSL via the dialect's TranslateToMSL binding.
 
@@ -256,11 +259,9 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                     """Return an index SSA value for a base_offset (int or IRValue)."""
                     if isinstance(base, int):
                         return _const_index(base)
-                    # Traced IRValue passed in as base_offset
                     from .._tracing import IRValue as _IRV
                     if isinstance(base, _IRV):
                         return _to_index(ssa[base.name])
-                    # Should not happen, but fall back to 0.
                     return _const_index(0)
 
                 _GRID_QUERY_OPS = {
@@ -470,7 +471,22 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                                     ssa[op.result.name] = out[0]
                         else:
                             a = ssa[a_name]
-                            ssa[op.result.name] = _SIMD_UNARY[t](a).result
+                            a_ty = str(a.type)
+                            if a_ty.startswith("vector<"):
+                                # Vec type: extract elements, reduce, then simd op
+                                n = int(a_ty.split("<")[1].split("x")[0])
+                                vel = a.type.element_type
+                                elems = [en.VecExtractOp(vel, a,
+                                         ir.IntegerAttr.get(i32, i)).result
+                                         for i in range(n)]
+                                is_float = "xf32" in a_ty or "xf16" in a_ty
+                                add_cls = arith.AddFOp if is_float else arith.AddIOp
+                                acc = elems[0]
+                                for e in elems[1:]:
+                                    acc = add_cls(acc, e).result
+                                ssa[op.result.name] = _SIMD_UNARY[t](acc).result
+                            else:
+                                ssa[op.result.name] = _SIMD_UNARY[t](a).result
 
                     elif t in _SIMD_SHUFFLE:
                         a = ssa[op.operands[0].name]
@@ -655,49 +671,144 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         base_idx = _resolve_base(base)
                         loaded = []
 
-                        for start, count in groups:
-                            for pos in range(count):
-                                off = start + pos
-                                if off == 0:
-                                    idx_v = base_idx
-                                else:
-                                    idx_v = arith.AddIOp(
-                                        base_idx,
-                                        _const_index(off)).result
-                                loaded.append(memref.LoadOp(buf, [idx_v]).result)
+                        from .._tracing import IRValue as _IRV
+                        base_align = 1
+                        if isinstance(base, _IRV) and base._tv_groups is None:
+                            total = sum(c for _, c in groups)
+                            if total >= 4 and all(s % 4 == 0 and c % 4 == 0
+                                                  for s, c in groups):
+                                base_align = 4
+                            elif total >= 2 and all(s % 2 == 0 and c % 2 == 0
+                                                    for s, c in groups):
+                                base_align = 2
+
+                        total_elems = sum(c for _, c in groups)
+                        if (len(groups) == 1 and total_elems in (2, 3, 4)
+                                and base_align >= total_elems
+                                and groups[0][0] % total_elems == 0):
+                            vw = total_elems
+                            elem_t = _elem_type(op.attrs["dtype"])
+                            vec_t = ir.VectorType.get([vw], elem_t)
+                            vec_memref_t = ir.MemRefType.get(
+                                [ir.ShapedType.get_dynamic_size()], vec_t)
+                            vec_buf = memref.CastOp(vec_memref_t, buf).result
+                            off = groups[0][0]
+                            abs_idx = base_idx if off == 0 else \
+                                arith.AddIOp(base_idx, _const_index(off)).result
+                            vec_idx = arith.DivSIOp(
+                                abs_idx, _const_index(vw)).result
+                            vec_val = memref.LoadOp(vec_buf, [vec_idx]).result
+                            ssa[op.result.name] = vec_val
+                            # No tv_elems entry — downstream uses vec ops directly
+                        else:
+                            elem_t = _elem_type(op.attrs["dtype"])
+                            _vec_casts = {}
+                            def _get_vec_buf(width):
+                                if width not in _vec_casts:
+                                    vt = ir.VectorType.get([width], elem_t)
+                                    vmt = ir.MemRefType.get(
+                                        [ir.ShapedType.get_dynamic_size()], vt)
+                                    _vec_casts[width] = memref.CastOp(vmt, buf).result
+                                return _vec_casts[width]
+
+                            for start, count in groups:
+                                pos = 0
+                                while pos < count:
+                                    off = start + pos
+                                    remaining = count - pos
+                                    vw = 1
+                                    if remaining >= 4 and off % 4 == 0 and base_align >= 4:
+                                        vw = 4
+                                    elif remaining >= 2 and off % 2 == 0 and base_align >= 2:
+                                        vw = 2
+
+                                    if vw > 1:
+                                        vec_buf = _get_vec_buf(vw)
+                                        abs_idx = base_idx if off == 0 else \
+                                            arith.AddIOp(base_idx, _const_index(off)).result
+                                        vec_idx = arith.DivSIOp(
+                                            abs_idx, _const_index(vw)).result
+                                        vec_val = memref.LoadOp(
+                                            vec_buf, [vec_idx]).result
+                                        for lane in range(vw):
+                                            e = en.VecExtractOp(
+                                                elem_t, vec_val,
+                                                ir.IntegerAttr.get(i32, lane)
+                                            ).result
+                                            loaded.append(e)
+                                        pos += vw
+                                    else:
+                                        if off == 0:
+                                            idx_v = base_idx
+                                        else:
+                                            idx_v = arith.AddIOp(
+                                                base_idx,
+                                                _const_index(off)).result
+                                        loaded.append(
+                                            memref.LoadOp(buf, [idx_v]).result)
+                                        pos += 1
 
                         tv_elems[op.result.name] = loaded
                         if loaded:
-                            ssa[op.result.name] = loaded[0]
+                                ssa[op.result.name] = loaded[0]
 
                     elif t in ("tv_add", "tv_sub", "tv_mul", "tv_div", "tv_mod"):
                         is_broadcast = op.attrs.get("broadcast_scalar", False)
                         scalar_on_left = op.attrs.get("scalar_on_left", False)
-                        a_elems = tv_elems[op.operands[0].name]
-                        ty_str = str(a_elems[0].type)
-                        is_float = ty_str in ("f32", "f16", "bf16")
-                        traced_dtype = op.attrs.get("dtype", "")
-                        is_unsigned = traced_dtype in ("uint", "uint32", "ushort", "uchar")
-                        _arith_cls = {
-                            "tv_add": arith.AddFOp if is_float else arith.AddIOp,
-                            "tv_sub": arith.SubFOp if is_float else arith.SubIOp,
-                            "tv_mul": arith.MulFOp if is_float else arith.MulIOp,
-                            "tv_div": arith.DivFOp if is_float else (arith.DivUIOp if is_unsigned else arith.DivSIOp),
-                            "tv_mod": arith.RemFOp if is_float else (arith.RemUIOp if is_unsigned else arith.RemSIOp),
-                        }[t]
-                        if is_broadcast:
-                            scalar_v = ssa[op.operands[1].name]
-                            if scalar_on_left:
-                                out = [_arith_cls(scalar_v, e).result for e in a_elems]
+                        a_name = op.operands[0].name
+
+                        _did_vec_op = False
+                        if a_name not in tv_elems and a_name in ssa:
+                            a_val = ssa[a_name]
+                            a_ty = str(a_val.type)
+                            if a_ty.startswith("vector<"):
+                                is_float = "xf32" in a_ty or "xf16" in a_ty or "xbf16" in a_ty
+                                _acls = {
+                                    "tv_add": arith.AddFOp if is_float else arith.AddIOp,
+                                    "tv_sub": arith.SubFOp if is_float else arith.SubIOp,
+                                    "tv_mul": arith.MulFOp if is_float else arith.MulIOp,
+                                    "tv_div": arith.DivFOp if is_float else arith.DivSIOp,
+                                    "tv_mod": arith.RemFOp if is_float else arith.RemSIOp,
+                                }[t]
+                                if is_broadcast:
+                                    scalar_v = ssa[op.operands[1].name]
+                                    n = int(a_ty.split("<")[1].split("x")[0])
+                                    splat = en.VecMakeOp(a_val.type, [scalar_v] * n).result
+                                    if scalar_on_left:
+                                        ssa[op.result.name] = _acls(splat, a_val).result
+                                    else:
+                                        ssa[op.result.name] = _acls(a_val, splat).result
+                                else:
+                                    b_val = ssa[op.operands[1].name]
+                                    ssa[op.result.name] = _acls(a_val, b_val).result
+                                _did_vec_op = True
+
+                        if not _did_vec_op:
+                            a_elems = tv_elems[a_name]
+                            ty_str = str(a_elems[0].type)
+                            is_float = ty_str in ("f32", "f16", "bf16")
+                            traced_dtype = op.attrs.get("dtype", "")
+                            is_unsigned = traced_dtype in ("uint", "uint32", "ushort", "uchar")
+                            _arith_cls = {
+                                "tv_add": arith.AddFOp if is_float else arith.AddIOp,
+                                "tv_sub": arith.SubFOp if is_float else arith.SubIOp,
+                                "tv_mul": arith.MulFOp if is_float else arith.MulIOp,
+                                "tv_div": arith.DivFOp if is_float else (arith.DivUIOp if is_unsigned else arith.DivSIOp),
+                                "tv_mod": arith.RemFOp if is_float else (arith.RemUIOp if is_unsigned else arith.RemSIOp),
+                            }[t]
+                            if is_broadcast:
+                                scalar_v = ssa[op.operands[1].name]
+                                if scalar_on_left:
+                                    out = [_arith_cls(scalar_v, e).result for e in a_elems]
+                                else:
+                                    out = [_arith_cls(e, scalar_v).result for e in a_elems]
                             else:
-                                out = [_arith_cls(e, scalar_v).result for e in a_elems]
-                        else:
-                            b_elems = tv_elems[op.operands[1].name]
-                            assert len(a_elems) == len(b_elems)
-                            out = [_arith_cls(x, y).result for x, y in zip(a_elems, b_elems)]
-                        tv_elems[op.result.name] = out
-                        if out:
-                            ssa[op.result.name] = out[0]
+                                b_elems = tv_elems[op.operands[1].name]
+                                assert len(a_elems) == len(b_elems)
+                                out = [_arith_cls(x, y).result for x, y in zip(a_elems, b_elems)]
+                            tv_elems[op.result.name] = out
+                            if out:
+                                ssa[op.result.name] = out[0]
 
                     elif t == "tv_store":
                         buf = buf_of[op.attrs["buffer"]]
@@ -770,7 +881,6 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
 
                     elif t == "determinant":
                         m = ssa[op.operands[0].name]
-                        # Result dtype recorded on the traced op
                         res_ty = m.type.element_type if hasattr(m.type, "element_type") else m.type
                         ssa[op.result.name] = en.DeterminantOp(res_ty, m).result
 
@@ -788,9 +898,16 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         iter_args_ir = op.attrs.get("iter_args", [])
                         yield_vals_ir = op.attrs.get("yield_vals", [])
                         results_ir = op.attrs.get("results", [])
-                        init_operands = [
-                            ssa[o.name] for o in op.operands[3:]
-                        ]
+
+                        init_operands = []
+                        tv_expand_map = {}  # name -> (start_idx, count)
+                        for o in op.operands[3:]:
+                            if o.name in tv_elems:
+                                elems = tv_elems[o.name]
+                                tv_expand_map[o.name] = (len(init_operands), len(elems))
+                                init_operands.extend(elems)
+                            else:
+                                init_operands.append(ssa[o.name])
 
                         for_op = scf_dialect.ForOp(
                             lo, hi, step,
@@ -799,18 +916,40 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         iv_ir = op.attrs["iv"]
                         ssa[iv_ir.name] = for_op.induction_variable
 
-                        # Bind iter_arg names (body-local SSA) before emitting body.
-                        for ia_ir, ia_val in zip(iter_args_ir, for_op.inner_iter_args):
-                            ssa[ia_ir.name] = ia_val
+                        inner_idx = 0
+                        for ia_ir, init_o in zip(iter_args_ir, op.operands[3:]):
+                            if init_o.name in tv_expand_map:
+                                start, count = tv_expand_map[init_o.name]
+                                elems = list(for_op.inner_iter_args[inner_idx:inner_idx+count])
+                                tv_elems[ia_ir.name] = elems
+                                ssa[ia_ir.name] = elems[0] if elems else None
+                                inner_idx += count
+                            else:
+                                ssa[ia_ir.name] = for_op.inner_iter_args[inner_idx]
+                                inner_idx += 1
 
                         with ir.InsertionPoint(for_op.body):
                             _emit_ops(op.regions[0])
-                            yield_operands = [ssa[v.name] for v in yield_vals_ir]
+                            # Expand TV yield values
+                            yield_operands = []
+                            for v in yield_vals_ir:
+                                if v.name in tv_elems:
+                                    yield_operands.extend(tv_elems[v.name])
+                                else:
+                                    yield_operands.append(ssa[v.name])
                             scf_dialect.YieldOp(yield_operands)
 
-                        # Bind loop results (for use after the loop).
-                        for res_ir, res_val in zip(results_ir, for_op.results):
-                            ssa[res_ir.name] = res_val
+                        res_idx = 0
+                        for res_ir, init_o in zip(results_ir, op.operands[3:]):
+                            if init_o.name in tv_expand_map:
+                                _, count = tv_expand_map[init_o.name]
+                                elems = list(for_op.results[res_idx:res_idx+count])
+                                tv_elems[res_ir.name] = elems
+                                ssa[res_ir.name] = elems[0] if elems else None
+                                res_idx += count
+                            else:
+                                ssa[res_ir.name] = for_op.results[res_idx]
+                                res_idx += 1
 
                     # --- Control flow: scf.if ---
                     elif t == "scf_if":

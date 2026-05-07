@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Benchmark utilities for Enigma kernels.
 
 Mirrors tilelang's MPS benchmark utilities (PR #1547). Provides:

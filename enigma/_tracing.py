@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tracing IR for Enigma kernel compilation."""
 
 from __future__ import annotations

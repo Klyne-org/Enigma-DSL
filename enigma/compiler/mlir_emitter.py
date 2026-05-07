@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Emit MLIR from traced IR using the Enigma dialect python bindings,
 then translate to MSL via the dialect's TranslateToMSL binding.
 

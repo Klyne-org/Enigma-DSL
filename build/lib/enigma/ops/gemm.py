@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tile-level ``gemm`` op for Enigma.
 
 This is the Enigma equivalent of tilelang's ``T.gemm`` (PRs #1869 and

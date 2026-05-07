@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Test helpers for Enigma.
 
 Mirrors ``tilelang.testing.requires_metal``: lets a test compile (emit

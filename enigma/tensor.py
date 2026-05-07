@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tensor = pointer + Layout. Supports both JIT-time symbolic ops and kernel-time IR tracing."""
 
 from __future__ import annotations

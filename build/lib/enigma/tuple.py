@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Hierarchical tuple utilities for CuTe-style layout algebra.
 
 Pure Python math — no GPU or tracing dependencies.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tensor = pointer + Layout. Supports both JIT-time symbolic ops and kernel-time IR tracing."""
 
 from __future__ import annotations
@@ -144,7 +147,13 @@ class Tensor:
         n_elem = product(self.layout.shape)
         groups = _group_contiguous(_compute_value_offsets(flat_s, flat_d, n_elem))
 
-        result = builder.new_value(self.metal_dtype)
+        total = sum(c for _, c in groups)
+        if (len(groups) == 1 and total in (2, 3, 4)
+                and groups[0][0] % total == 0):
+            from ._tracing import _vec_dtype
+            result = builder.new_value(_vec_dtype(self.metal_dtype, total))
+        else:
+            result = builder.new_value(self.metal_dtype)
         result._tv_groups = groups
         builder.record(
             IROp(

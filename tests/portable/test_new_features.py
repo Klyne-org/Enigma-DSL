@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tests for the metal-only DSL additions inspired by tilelang_metal_analysis.md.
 
 These cover (Tier 1 / Tier 2):

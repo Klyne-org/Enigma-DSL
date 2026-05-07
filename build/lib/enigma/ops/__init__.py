@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Higher-level tile ops built on top of the Enigma tracing primitives.
 
 These are user-facing helpers that lower to combinations of intrinsics

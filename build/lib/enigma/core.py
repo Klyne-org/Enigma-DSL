@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Layout algebra engine for CuTe-style tiling on Apple Metal.
 
 A Layout is (Shape, Stride) mapping coordinates to memory offsets:

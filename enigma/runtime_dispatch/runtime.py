@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Metal GPU dispatch via ctypes -> Swift dylib."""
 
 from __future__ import annotations

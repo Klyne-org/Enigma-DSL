@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """@enigma.kernel and @enigma.jit decorators."""
 
 from __future__ import annotations

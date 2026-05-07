@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Enigma — A Python DSL for Apple Metal GPU kernels."""
 
 try:
@@ -252,7 +255,13 @@ from ._tracing import (
     determinant as determinant,
     # --- Errors ---
     EnigmaError as EnigmaError,
+    # --- AST preprocessor support ---
+    _EnigmaRange as _EnigmaRange,
+    _EnigmaRangeConstexpr as _EnigmaRangeConstexpr,
 )
+
+range = _EnigmaRange()
+range_constexpr = _EnigmaRangeConstexpr()
 
 class arch:
     """Metal thread/block index accessors for use inside @enigma.kernel."""
