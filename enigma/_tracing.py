@@ -870,6 +870,9 @@ class KernelBuilder:
     def _pop_region(self) -> List[IROp]:
         """Pop the current region from the stack and return it."""
         assert len(self._region_stack) > 1, "Cannot pop root region"
+        # Invalidate const cache — constants created inside this region
+        # are scoped to it and must not be reused in outer regions.
+        self._const_cache.clear()
         return self._region_stack.pop()
 
     def get_thread_position_in_grid(self) -> IRValue:
@@ -1002,14 +1005,14 @@ class _ForRangeContext:
             for iv in self._init_vals:
                 arg = self._builder.new_value(iv.dtype)
                 arg.name = f"_ia{self._builder._counter}"
+                arg._tv_groups = iv._tv_groups
                 self._iter_args.append(arg)
             self._carry = Carry(self._iter_args)
-            # Placeholder IRValues that will become the for-op results
-            # after __exit__ rebinds them. They're reserved up-front so
-            # the scf_for op has a stable list of result names.
-            self._result_vals: List[IRValue] = [
-                self._builder.new_value(iv.dtype) for iv in self._init_vals
-            ]
+            self._result_vals: List[IRValue] = []
+            for iv in self._init_vals:
+                r = self._builder.new_value(iv.dtype)
+                r._tv_groups = iv._tv_groups
+                self._result_vals.append(r)
 
     def __enter__(self):
         self._body = self._builder._push_region()
@@ -1587,3 +1590,113 @@ class Pipeline:
 def pipeline(dtype: str, size: int, stages: int = 2) -> Pipeline:
     """Create a :class:`Pipeline` for multi-stage tile loads."""
     return Pipeline(dtype=dtype, size=size, stages=stages)
+
+
+
+
+class _EnigmaRange:
+    """Sentinel for enigma.range() — recognized by the AST preprocessor."""
+    def __call__(self, *args):
+        raise EnigmaError(
+            "enigma.range() must be used as `for i in enigma.range(...)` "
+            "inside @enigma.kernel. The AST preprocessor rewrites it automatically."
+        )
+
+
+class _EnigmaRangeConstexpr:
+    """Sentinel for enigma.range_constexpr() — unrolled at trace time."""
+    def __call__(self, *args):
+        if len(args) == 1:
+            return range(args[0])
+        elif len(args) == 2:
+            return range(args[0], args[1])
+        elif len(args) == 3:
+            return range(args[0], args[1], args[2])
+        raise EnigmaError("enigma.range_constexpr() expects 1-3 arguments")
+
+
+def _enigma_for_range(start, stop, step, body_fn, *init_vals):
+    """Runtime helper for AST-preprocessed for loops.
+
+    Called from rewritten kernel code. Uses for_range(init=...) internally.
+    Handles lists of IRValues by flattening into individual carry slots.
+    Non-IRValue objects (Tensors, RegisterTensors) are passed by reference
+    and not carried through scf.for iter_args.
+    """
+    from .tensor import Tensor
+
+    carry_indices = []
+    pass_indices = []
+    carry_vals = []
+    pass_vals = []
+    for idx, v in enumerate(init_vals):
+        if isinstance(v, (Tensor, RegisterTensor)):
+            pass_indices.append(idx)
+            pass_vals.append(v)
+        else:
+            carry_indices.append(idx)
+            carry_vals.append(v)
+
+    if not carry_vals:
+        with for_range(start, stop, step) as iv:
+            all_args = list(init_vals)
+            body_fn(iv, *all_args)
+        return init_vals
+
+    flat_vals, structure = _flatten_carry_vals(carry_vals)
+
+    with for_range(start, stop, step, init=flat_vals) as (iv, carry):
+        reconstructed = _unflatten_carry_vals(
+            [carry[i] for i in range(len(flat_vals))], structure
+        )
+        all_args = [None] * len(init_vals)
+        for ci, ri in enumerate(carry_indices):
+            all_args[ri] = reconstructed[ci]
+        for pi, ri in enumerate(pass_indices):
+            all_args[ri] = pass_vals[pi]
+
+        results = body_fn(iv, *all_args)
+        if not isinstance(results, tuple):
+            results = (results,)
+
+        new_carry_vals = [results[ci] for ci in carry_indices]
+        new_flat = _flatten_carry_vals(new_carry_vals)[0]
+        for i, v in enumerate(new_flat):
+            carry[i] = v
+
+    final_flat = [carry[i] for i in range(len(flat_vals))]
+    final_carry = _unflatten_carry_vals(final_flat, structure)
+
+    final_all = list(init_vals)
+    for ci, ri in enumerate(carry_indices):
+        final_all[ri] = final_carry[ci]
+    return tuple(final_all)
+
+
+def _flatten_carry_vals(vals):
+    """Flatten a list of values (scalars, IRValues, lists of IRValues) into
+    a flat list + structure info for reconstruction."""
+    flat = []
+    structure = []
+    for v in vals:
+        if isinstance(v, list):
+            structure.append(("list", len(v)))
+            flat.extend(v)
+        else:
+            structure.append(("scalar", 1))
+            flat.append(v)
+    return flat, structure
+
+
+def _unflatten_carry_vals(flat, structure):
+    """Reconstruct carried values from flat list using structure info."""
+    result = []
+    idx = 0
+    for kind, count in structure:
+        if kind == "list":
+            result.append(list(flat[idx:idx + count]))
+            idx += count
+        else:
+            result.append(flat[idx])
+            idx += 1
+    return result

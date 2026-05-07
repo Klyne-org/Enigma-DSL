@@ -76,7 +76,9 @@ class KernelHandle:
 
     def launch(self, grid: Tuple[int, ...], block: Tuple[int, ...]):
         from ..tensor import Tensor
+        from .preprocessor import preprocess_kernel
 
+        fn = preprocess_kernel(self.kernel_def.fn)
         builder = KernelBuilder(self.kernel_def.name)
 
         seen: set[str] = set()
@@ -86,7 +88,7 @@ class KernelHandle:
                 seen.add(arg.name)
 
         with builder:
-            self.kernel_def.fn(*self.args, **self.kwargs)
+            fn(*self.args, **self.kwargs)
 
         ctx = _get_jit_context()
         if ctx is not None:
@@ -110,10 +112,11 @@ def _metal_dtype_from_annotation(ann) -> str:
 def trace_kernel(kdef: KernelDef) -> KernelBuilder:
     """Trace a @kernel with type-annotated params (naive path).
 
-    Scalar-annotated params (``enigma.Scalar(dtype)``) are lowered to a
-    1-element buffer and auto-loaded at the top of the kernel; user code
-    sees them as ``IRValue``s directly.
+    Applies AST preprocessing (enigma.range() rewriting) before tracing.
     """
+    from .preprocessor import preprocess_kernel
+    fn = preprocess_kernel(kdef.fn)
+
     builder = KernelBuilder(kdef.name)
     params = list(kdef._sig.parameters.values())
 
@@ -144,5 +147,5 @@ def trace_kernel(kdef: KernelDef) -> KernelBuilder:
             else:
                 proxies.append(Tensor(param.name, idx, metal_dtype))
 
-        kdef.fn(*proxies)
+        fn(*proxies)
     return builder
