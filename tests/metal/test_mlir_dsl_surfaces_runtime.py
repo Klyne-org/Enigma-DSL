@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Runtime tests for DSL surfaces routed through the MLIR emitter."""
 
 import os

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Klyne Research
+
 """Tests for DSL extensions added after R1: Carry/iter_args, Scalar args,
 RegisterTensor, copy, load_if/store_if, Pipeline, capability queries.
 
@@ -12,7 +15,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import enigma
-from enigma._tracing import KernelBuilder, RegisterTensor, TracingTensor
+from enigma._tracing import KernelBuilder, RegisterTensor, Tensor
 
 
 def _make_builder(*bufs):
@@ -26,8 +29,8 @@ class TestForRangeIterArgs(unittest.TestCase):
     def test_init_produces_iter_args_and_results(self):
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
-            Out = TracingTensor("Out", 1, "float")
+            A = Tensor("A", 0, "float")
+            Out = Tensor("Out", 1, "float")
             tid = enigma.thread_position_in_grid
             zero = b.make_const("float", 0.0)
             with enigma.for_range(0, 8, init=[zero]) as (i, carry):
@@ -47,7 +50,7 @@ class TestForRangeIterArgs(unittest.TestCase):
         """After the with-block, carry[i] must equal the for_op's i-th result."""
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             zero = b.make_const("float", 0.0)
             with enigma.for_range(0, 4, init=[zero]) as (i, carry):
                 carry[0] = carry[0] + A[i]
@@ -77,7 +80,7 @@ class TestRegisterTensor(unittest.TestCase):
     def test_register_tensor_indexing_emits_ops(self):
         b = _make_builder("A", "Out")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             reg = enigma.register_tensor(shape=(2, 2), dtype="float", fill=0.0)
             tid = enigma.thread_position_in_grid
             reg[0, 0] = A[tid]
@@ -90,8 +93,8 @@ class TestCopy(unittest.TestCase):
     def test_copy_emits_for_loop(self):
         b = _make_builder("A", "B")
         with b:
-            A = TracingTensor("A", 0, "float")
-            B = TracingTensor("B", 1, "float")
+            A = Tensor("A", 0, "float")
+            B = Tensor("B", 1, "float")
             enigma.copy(A, B, count=16)
         for_ops = [op for op in b.ops if op.op_type == "scf_for"]
         self.assertEqual(len(for_ops), 1)
@@ -101,8 +104,8 @@ class TestLoadStoreIf(unittest.TestCase):
     def test_store_if_wraps_store_in_scf_if(self):
         b = _make_builder("A", "B")
         with b:
-            A = TracingTensor("A", 0, "float")
-            B = TracingTensor("B", 1, "float")
+            A = Tensor("A", 0, "float")
+            B = Tensor("B", 1, "float")
             tid = enigma.thread_position_in_grid
             ten = b.make_const("int", 10)
             mask = enigma.cmp_lt(tid, enigma.metal_cast(ten, "int"))
@@ -114,7 +117,7 @@ class TestLoadStoreIf(unittest.TestCase):
     def test_load_if_uses_select(self):
         b = _make_builder("A")
         with b:
-            A = TracingTensor("A", 0, "float")
+            A = Tensor("A", 0, "float")
             tid = enigma.thread_position_in_grid
             ten = b.make_const("int", 10)
             mask = enigma.cmp_lt(tid, enigma.metal_cast(ten, "int"))

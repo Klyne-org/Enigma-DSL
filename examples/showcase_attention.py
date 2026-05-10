@@ -219,14 +219,14 @@ fa_naive_compiled = enigma.compile(fa_naive)
 @enigma.kernel
 def fa_tv_kernel(Q, K, V, O):
     # When invoked through @enigma.jit, Q/K/V/O arrive as layout-aware
-    # ``Tensor`` objects (not the flat TracingTensor the naive path uses),
+    # ``Tensor`` objects (not the flat Tensor the naive path uses),
     # so we re-wrap them as scalar-indexable proxies for the FA body.
     # This keeps the body helper unchanged between the two versions.
-    from enigma._tracing import TracingTensor
-    Qt = TracingTensor(Q.name, Q.buffer_index, Q.metal_dtype)
-    Kt = TracingTensor(K.name, K.buffer_index, K.metal_dtype)
-    Vt = TracingTensor(V.name, V.buffer_index, V.metal_dtype)
-    Ot = TracingTensor(O.name, O.buffer_index, O.metal_dtype)
+    from enigma._tracing import Tensor
+    Qt = Tensor(Q.name, Q.buffer_index, Q.metal_dtype)
+    Kt = Tensor(K.name, K.buffer_index, K.metal_dtype)
+    Vt = Tensor(V.name, V.buffer_index, V.metal_dtype)
+    Ot = Tensor(O.name, O.buffer_index, O.metal_dtype)
 
     # Reconstruct the global query-row index from block / thread IDs.
     # This is equivalent to `thread_position_in_grid` for our 1-D launch,
