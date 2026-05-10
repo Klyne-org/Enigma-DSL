@@ -646,6 +646,19 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                                 ir.IntegerType.get_signless(64), _CMP_PRED_FLOAT[t])
                             ssa[op.result.name] = arith.CmpFOp(pred, a, b).result
                         else:
+                            # arith.cmpi requires matching operand types. The
+                            # tracer may feed in (index, i32) when a builtin
+                            # query is compared against a Python int literal —
+                            # reconcile by promoting either side to index when
+                            # they disagree. (Same-typed inputs pass through.)
+                            if str(a.type) != str(b.type):
+                                if str(a.type) == "index":
+                                    b = _to_index(b)
+                                elif str(b.type) == "index":
+                                    a = _to_index(a)
+                                else:
+                                    a = _to_index(a)
+                                    b = _to_index(b)
                             pred = ir.IntegerAttr.get(
                                 ir.IntegerType.get_signless(64), _CMP_PRED_INT[t])
                             ssa[op.result.name] = arith.CmpIOp(pred, a, b).result
@@ -658,99 +671,39 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         ssa[op.result.name] = en.FunctionConstantOp(
                             mlir_ty, idx_attr).result
 
-                    # --- TV-layout ops (vectorized via memref.cast) ---
+                    # --- TV-layout ops ---
+                    # The "vec via memref.cast" fast path is broken: MLIR's
+                    # ``memref.cast`` does not permit changing the element
+                    # type, and the dialect's MSL emitter does not lower the
+                    # cast correctly even when it does pass. Until the
+                    # vectorised buffer-signature path lands (the ``vec_width``
+                    # kwarg to ``enigma.compile``), emit per-element scalar
+                    # loads — that matches what ``tv_store`` already does and
+                    # produces correct output. Vectorisation can come back
+                    # via a proper ``memref.reinterpret_cast`` or a vector
+                    # dialect lowering once the dialect supports it.
                     elif t == "tv_load":
-                        # Issue scalar loads from the buffer; the dialect's
-                        # MSL emitter does not currently lower memref.cast,
-                        # so we avoid the vec-buffer alias path here. Pass
-                        # ``vec_width`` to ``enigma.compile`` for the
-                        # vectorised buffer-signature path.
                         buf = buf_of[op.attrs["buffer"]]
                         base = op.attrs["base_offset"]
                         groups = op.attrs["groups"]
                         base_idx = _resolve_base(base)
                         loaded = []
 
-                        from .._tracing import IRValue as _IRV
-                        base_align = 1
-                        if isinstance(base, _IRV) and base._tv_groups is None:
-                            total = sum(c for _, c in groups)
-                            if total >= 4 and all(s % 4 == 0 and c % 4 == 0
-                                                  for s, c in groups):
-                                base_align = 4
-                            elif total >= 2 and all(s % 2 == 0 and c % 2 == 0
-                                                    for s, c in groups):
-                                base_align = 2
-
-                        total_elems = sum(c for _, c in groups)
-                        if (len(groups) == 1 and total_elems in (2, 3, 4)
-                                and base_align >= total_elems
-                                and groups[0][0] % total_elems == 0):
-                            vw = total_elems
-                            elem_t = _elem_type(op.attrs["dtype"])
-                            vec_t = ir.VectorType.get([vw], elem_t)
-                            vec_memref_t = ir.MemRefType.get(
-                                [ir.ShapedType.get_dynamic_size()], vec_t)
-                            vec_buf = memref.CastOp(vec_memref_t, buf).result
-                            off = groups[0][0]
-                            abs_idx = base_idx if off == 0 else \
-                                arith.AddIOp(base_idx, _const_index(off)).result
-                            vec_idx = arith.DivSIOp(
-                                abs_idx, _const_index(vw)).result
-                            vec_val = memref.LoadOp(vec_buf, [vec_idx]).result
-                            ssa[op.result.name] = vec_val
-                            # No tv_elems entry — downstream uses vec ops directly
-                        else:
-                            elem_t = _elem_type(op.attrs["dtype"])
-                            _vec_casts = {}
-                            def _get_vec_buf(width):
-                                if width not in _vec_casts:
-                                    vt = ir.VectorType.get([width], elem_t)
-                                    vmt = ir.MemRefType.get(
-                                        [ir.ShapedType.get_dynamic_size()], vt)
-                                    _vec_casts[width] = memref.CastOp(vmt, buf).result
-                                return _vec_casts[width]
-
-                            for start, count in groups:
-                                pos = 0
-                                while pos < count:
-                                    off = start + pos
-                                    remaining = count - pos
-                                    vw = 1
-                                    if remaining >= 4 and off % 4 == 0 and base_align >= 4:
-                                        vw = 4
-                                    elif remaining >= 2 and off % 2 == 0 and base_align >= 2:
-                                        vw = 2
-
-                                    if vw > 1:
-                                        vec_buf = _get_vec_buf(vw)
-                                        abs_idx = base_idx if off == 0 else \
-                                            arith.AddIOp(base_idx, _const_index(off)).result
-                                        vec_idx = arith.DivSIOp(
-                                            abs_idx, _const_index(vw)).result
-                                        vec_val = memref.LoadOp(
-                                            vec_buf, [vec_idx]).result
-                                        for lane in range(vw):
-                                            e = en.VecExtractOp(
-                                                elem_t, vec_val,
-                                                ir.IntegerAttr.get(i32, lane)
-                                            ).result
-                                            loaded.append(e)
-                                        pos += vw
-                                    else:
-                                        if off == 0:
-                                            idx_v = base_idx
-                                        else:
-                                            idx_v = arith.AddIOp(
-                                                base_idx,
-                                                _const_index(off)).result
-                                        loaded.append(
-                                            memref.LoadOp(buf, [idx_v]).result)
-                                        pos += 1
+                        for start, count in groups:
+                            for pos in range(count):
+                                off = start + pos
+                                if off == 0:
+                                    idx_v = base_idx
+                                else:
+                                    idx_v = arith.AddIOp(
+                                        base_idx,
+                                        _const_index(off)).result
+                                loaded.append(
+                                    memref.LoadOp(buf, [idx_v]).result)
 
                         tv_elems[op.result.name] = loaded
                         if loaded:
-                                ssa[op.result.name] = loaded[0]
+                            ssa[op.result.name] = loaded[0]
 
                     elif t in ("tv_add", "tv_sub", "tv_mul", "tv_div", "tv_mod"):
                         is_broadcast = op.attrs.get("broadcast_scalar", False)
@@ -1013,8 +966,21 @@ def emit_mlir(builder: KernelBuilder, vec_width: int = 0) -> str:
 
 
 def emit_msl(builder: KernelBuilder, vec_width: int = 0) -> str:
-    """Trace -> MLIR -> MSL, using the dialect's TranslateToMSL binding."""
+    """Trace -> MLIR -> MSL, using the dialect's TranslateToMSL binding.
+
+    Runs canonicalize + CSE on the module before translation so the emitted
+    MSL is human-readable. Set ``ENIGMA_NO_CANONICALIZE=1`` to bypass the
+    pipeline if it ever produces wrong code (and please file a bug).
+    """
+    import os
     from mlir.dialects import enigma as en
 
     module = _build_module(builder, vec_width=vec_width)
+    if not os.environ.get("ENIGMA_NO_CANONICALIZE"):
+        try:
+            en.run_standard_pipeline(module.operation)
+        except Exception:
+            # If canonicalization fails for any reason, fall back to the
+            # raw emission rather than crash the compile.
+            pass
     return en.translate_to_msl(module.operation)

@@ -392,6 +392,34 @@ class MetalRuntime:
             multi_out = False
         scalar_params = getattr(compiled, "scalar_params", None) or []
 
+        # Validate that the bind list (inputs + scalars + outputs) covers
+        # every kernel parameter exactly once. Without this check the runtime
+        # silently appends output buffers after the supplied inputs and
+        # in-place-style kernels return zeros — a footgun that has burned
+        # real users.
+        num_params = getattr(compiled, "num_params", None)
+        if num_params is not None:
+            n_inputs = len(inputs)
+            n_scalars = len(scalars) if scalars else 0
+            n_outputs = len(out_sizes)
+            total = n_inputs + n_scalars + n_outputs
+            if total != num_params:
+                param_names = getattr(compiled, "param_names", None) or []
+                names_hint = (
+                    f"  kernel '{compiled.kernel_name}' params: {param_names}\n"
+                    if param_names else ""
+                )
+                raise _gpu_error(
+                    f"execute: kernel '{compiled.kernel_name}' has "
+                    f"{num_params} parameter(s), but got "
+                    f"{n_inputs} input(s) + {n_scalars} scalar(s) + "
+                    f"{n_outputs} output buffer(s) = {total}.\n"
+                    f"{names_hint}"
+                    f"Outputs are appended AFTER inputs in the bind list. "
+                    f"Pass every kernel parameter exactly once across "
+                    f"inputs= / scalars= / output_size(s)/_shapes."
+                )
+
         gpu_bufs = []
         mlx_output_arrays: list = []  # kept alive for the duration of dispatch
         mlx_input_keepalive: list = []  # inputs passed as mlx.array
@@ -502,6 +530,30 @@ class MetalRuntime:
         self, compiled: CompiledKernel, inputs: List[np.ndarray], output_size: int
     ) -> PreparedKernel:
         """Pre-allocate GPU resources for fast repeated dispatch."""
+        # Same bind-count check as execute(): inputs + 1 output buffer must
+        # match the kernel's parameter count. prepare() doesn't take scalars
+        # today, so any scalar-bearing kernel needs execute() (or this needs
+        # to grow a scalars= kwarg).
+        num_params = getattr(compiled, "num_params", None)
+        if num_params is not None:
+            scalar_params = getattr(compiled, "scalar_params", None) or []
+            n_scalars = len(scalar_params)
+            total = len(inputs) + n_scalars + 1  # +1 for the single output
+            if total != num_params:
+                param_names = getattr(compiled, "param_names", None) or []
+                names_hint = (
+                    f"  kernel '{compiled.kernel_name}' params: {param_names}\n"
+                    if param_names else ""
+                )
+                raise _gpu_error(
+                    f"prepare: kernel '{compiled.kernel_name}' has "
+                    f"{num_params} parameter(s), but got "
+                    f"{len(inputs)} input(s) + {n_scalars} scalar(s) + "
+                    f"1 output buffer = {total}.\n"
+                    f"{names_hint}"
+                    f"The output is appended AFTER inputs in the bind list."
+                )
+
         mtl_lib = self._lib.enigma_load_library(self._device, compiled.metallib_path.encode())
         if not mtl_lib:
             raise _gpu_error("failed to load metallib", path=compiled.metallib_path)

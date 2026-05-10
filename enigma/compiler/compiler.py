@@ -39,6 +39,13 @@ class CompiledKernel:
     # (name, buffer_index, metal_dtype) for each Scalar-annotated param.
     # The runtime packs a Python value into a 1-element buffer per entry.
     scalar_params: list = None  # type: ignore[assignment]
+    # Total kernel parameter count (includes both buffer params and scalar
+    # params, which the runtime packs into 1-element buffers). The runtime
+    # validates inputs+scalars+outputs == num_params on every dispatch.
+    num_params: Optional[int] = None
+    # Names of the kernel parameters in declaration order, used for clearer
+    # error messages when the bind count is wrong.
+    param_names: Optional[list] = None
 
     @property
     def kernel_source(self) -> str:
@@ -153,6 +160,11 @@ def _emit_and_build(
         print(f"=== Metal ===\n{metal_source}")
 
     scalar_params = getattr(builder, "scalar_params", []) or []
+    # builder.args = [(name, buffer_index, metal_dtype), ...] for every kernel
+    # parameter (buffer + scalar). num_params is the total bind-list length
+    # the runtime must satisfy: inputs + scalars + outputs.
+    num_params = len(getattr(builder, "args", []) or [])
+    param_names = [a[0] for a in (getattr(builder, "args", []) or [])]
 
     if emit_only:
         return CompiledKernel(
@@ -162,6 +174,8 @@ def _emit_and_build(
             metal_source=metal_source,
             mlir_source=mlir_source,
             scalar_params=scalar_params,
+            num_params=num_params,
+            param_names=param_names,
         )
 
     if work_dir is None:
@@ -192,6 +206,8 @@ def _emit_and_build(
         metal_source=metal_source,
         mlir_source=mlir_source,
         scalar_params=scalar_params,
+        num_params=num_params,
+        param_names=param_names,
     )
 
 

@@ -41,21 +41,24 @@ reach the GPU.
 
 ## Install
 
-Requirements: Apple Silicon Mac, Xcode Command Line Tools, Python 3.12.
+Requirements: Apple Silicon Mac, Xcode Command Line Tools, Python 3.11 / 3.12 / 3.13.
+
+Pre-built wheels for the dialect (Python ABI-specific) and the DSL (pure
+Python) are shipped in the `wheelhouse/` directory. The fastest path:
 
 ```bash
-git clone --recursive https://github.com/Klyne-Research/Enigma-DSL.git
+git clone https://github.com/Klyne-Research/Enigma-DSL.git
 cd Enigma-DSL
-./build_all.sh   # builds LLVM/MLIR, dialect wheel, DSL wheel; sets up .venv/
-source .venv/bin/activate
-```
-
-The first run builds an LLVM/MLIR snapshot at `~/.local/enigma-llvm/` and
-takes a while; subsequent runs are quick. After install:
-
-```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install wheelhouse/enigma_dsl-*-py3-none-any.whl \
+            wheelhouse/enigma_dialect-*-cp312-cp312-*.whl
+pip install numpy
 python examples/vector_add.py
 ```
+
+Pick the `enigma_dialect-*-cpXY-*` wheel that matches your Python ABI
+(`cp311`, `cp312`, or `cp313`). The DSL wheel is the same `py3-none-any.whl`
+for every Python version.
 
 ## Hello, Metal
 
