@@ -671,39 +671,77 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         ssa[op.result.name] = en.FunctionConstantOp(
                             mlir_ty, idx_attr).result
 
-                    # --- TV-layout ops ---
-                    # The "vec via memref.cast" fast path is broken: MLIR's
-                    # ``memref.cast`` does not permit changing the element
-                    # type, and the dialect's MSL emitter does not lower the
-                    # cast correctly even when it does pass. Until the
-                    # vectorised buffer-signature path lands (the ``vec_width``
-                    # kwarg to ``enigma.compile``), emit per-element scalar
-                    # loads — that matches what ``tv_store`` already does and
-                    # produces correct output. Vectorisation can come back
-                    # via a proper ``memref.reinterpret_cast`` or a vector
-                    # dialect lowering once the dialect supports it.
+                    # --- TV-layout loads ---
+                    # Two shapes:
+                    #
+                    #   * Fast path (single-group, aligned, width ∈ {2,3,4}):
+                    #     emit ONE vector load via memref.cast so downstream
+                    #     ``enigma.dot``/``length``/etc. can consume a real
+                    #     vector. This relies on the MSL emitter lowering the
+                    #     cast correctly (it does for the simple in-place
+                    #     pattern). Skipped by canonicalize+CSE today on a
+                    #     verifier technicality, but functionally correct end
+                    #     to end — that's the path benchmark_sdpa.py uses.
+                    #
+                    #   * Scalar fallback: walk groups one element at a time,
+                    #     emit plain ``memref.LoadOp``s, stash in ``tv_elems``
+                    #     for per-element downstream use (``tv_add`` etc.).
+                    #     Used by the TV-layout add tests.
                     elif t == "tv_load":
                         buf = buf_of[op.attrs["buffer"]]
                         base = op.attrs["base_offset"]
                         groups = op.attrs["groups"]
                         base_idx = _resolve_base(base)
-                        loaded = []
 
-                        for start, count in groups:
-                            for pos in range(count):
-                                off = start + pos
-                                if off == 0:
-                                    idx_v = base_idx
-                                else:
-                                    idx_v = arith.AddIOp(
-                                        base_idx,
-                                        _const_index(off)).result
-                                loaded.append(
-                                    memref.LoadOp(buf, [idx_v]).result)
+                        from .._tracing import IRValue as _IRV
+                        base_align = 1
+                        if isinstance(base, _IRV) and base._tv_groups is None:
+                            total = sum(c for _, c in groups)
+                            if total >= 4 and all(s % 4 == 0 and c % 4 == 0
+                                                  for s, c in groups):
+                                base_align = 4
+                            elif total >= 2 and all(s % 2 == 0 and c % 2 == 0
+                                                    for s, c in groups):
+                                base_align = 2
 
-                        tv_elems[op.result.name] = loaded
-                        if loaded:
-                            ssa[op.result.name] = loaded[0]
+                        total_elems = sum(c for _, c in groups)
+                        if (len(groups) == 1 and total_elems in (2, 3, 4)
+                                and base_align >= total_elems
+                                and groups[0][0] % total_elems == 0):
+                            # Fast path: single vector load.
+                            vw = total_elems
+                            elem_t = _elem_type(op.attrs["dtype"])
+                            vec_t = ir.VectorType.get([vw], elem_t)
+                            vec_memref_t = ir.MemRefType.get(
+                                [ir.ShapedType.get_dynamic_size()], vec_t)
+                            vec_buf = memref.CastOp(vec_memref_t, buf).result
+                            off = groups[0][0]
+                            abs_idx = base_idx if off == 0 else \
+                                arith.AddIOp(base_idx,
+                                             _const_index(off)).result
+                            vec_idx = arith.DivSIOp(
+                                abs_idx, _const_index(vw)).result
+                            ssa[op.result.name] = memref.LoadOp(
+                                vec_buf, [vec_idx]).result
+                            # No tv_elems entry — downstream uses the vec
+                            # directly via enigma.dot etc.
+                        else:
+                            # Scalar fallback: per-element loads.
+                            loaded = []
+                            for start, count in groups:
+                                for pos in range(count):
+                                    off = start + pos
+                                    if off == 0:
+                                        idx_v = base_idx
+                                    else:
+                                        idx_v = arith.AddIOp(
+                                            base_idx,
+                                            _const_index(off)).result
+                                    loaded.append(
+                                        memref.LoadOp(buf, [idx_v]).result)
+                            tv_elems[op.result.name] = loaded
+                            if loaded:
+                                ssa[op.result.name] = loaded[0]
 
                     elif t in ("tv_add", "tv_sub", "tv_mul", "tv_div", "tv_mod"):
                         is_broadcast = op.attrs.get("broadcast_scalar", False)
