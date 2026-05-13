@@ -374,6 +374,8 @@ rmsnorm_c   = enigma.compile(rmsnorm_kernel)
 matvec_c    = enigma.compile(matvec_kernel)
 rope_c      = enigma.compile(head_rmsnorm_rope_kernel)
 sdpa_c      = enigma.compile(sdpa_kernel)
+
+sdpa_c.export_metal(os.path.join(os.path.dirname(__file__), "sdpa_c.metal"))
 oproj_c     = enigma.compile(o_proj_kernel)
 swiglu_c    = enigma.compile(swiglu_kernel)
 downproj_c  = enigma.compile(down_proj_kernel)

@@ -244,6 +244,11 @@ from ._tracing import (
     async_copy_to_threadgroup as async_copy_to_threadgroup,
     async_copy_commit as async_copy_commit,
     async_copy_wait as async_copy_wait,
+    # --- AIR-backed async copy (M3+): direct dialect surface ---
+    async_copy_1d_d2t as async_copy_1d_d2t,
+    async_copy_1d_t2d as async_copy_1d_t2d,
+    async_copy_2d_d2t as async_copy_2d_d2t,
+    async_copy_2d_t2d as async_copy_2d_t2d,
     # --- Simdgroup matrix ops ---
     simdgroup_matrix_load as simdgroup_matrix_load,
     simdgroup_matrix_store as simdgroup_matrix_store,

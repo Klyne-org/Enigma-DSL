@@ -1450,12 +1450,21 @@ def register_tensor(shape, dtype: str = "float", fill=0) -> RegisterTensor:
 
 
 # ============================================================================
-# R6 — Async copy (M3+ only)
+# R6 — Async copy (M3+ only) — backed by AIR intrinsics through the dialect
 # ============================================================================
-# The dialect ops for `enigma.async_copy_to_threadgroup / commit / wait` are
-# not yet present in the wheel. The DSL surface is provided so user code can
-# be written today; a clear error guides the user to run on M3+ hardware and
-# to wait for dialect support to land.
+# These ops lower to the `enigma.async_copy_*` dialect ops, which the MSL
+# emitter writes out as `__asm("air.simdgroup_async_copy_*")` extern calls.
+#
+# Surface summary:
+#   - async_copy_1d_d2t(dst, dst_offset, src, src_offset, count)  -> event
+#   - async_copy_1d_t2d(dst, dst_offset, src, src_offset, count)  -> event
+#   - async_copy_2d_d2t(dst, dst_off, dst_epr, src, src_off, src_epr,
+#                       tile_cols, tile_rows)                     -> event
+#   - async_copy_2d_t2d(...)                                       -> event
+#   - async_copy_wait(*events)
+#
+# The legacy `async_copy_to_threadgroup / commit / wait` helpers still exist
+# below for back-compat; they now lower to the 1D variant.
 
 
 class _AsyncCopyUnavailable(Exception):
@@ -1463,18 +1472,11 @@ class _AsyncCopyUnavailable(Exception):
 
 
 def _require_m3_runtime(feature: str) -> None:
-    """Check device capabilities at trace time (best-effort).
-
-    If a MetalRuntime happens to have been instantiated, use it; otherwise
-    skip the check (runtime dispatch will catch it when the kernel is
-    launched).
-    """
+    """Check device capabilities at trace time (best-effort)."""
     try:
         from .runtime_dispatch.runtime import MetalRuntime  # noqa: WPS433
     except Exception:
         return
-    # Cached capability probe: cheap to re-query, but only do it once.
-    global _CACHED_CAPS
     try:
         rt = MetalRuntime()
         caps = rt.device_capabilities()
@@ -1483,40 +1485,115 @@ def _require_m3_runtime(feature: str) -> None:
     caps.require_m3(feature)
 
 
+def _async_copy_record(op_type: str, dst, src, offsets_and_extents, attrs):
+    """Shared plumbing: emit an IR op carrying buffer names and index operands."""
+    builder = _require_builder(op_type)
+    ev = builder.new_value("i64")  # event handle (opaque ulong)
+    operands = [_ensure_ir(x) for x in offsets_and_extents]
+    builder.record(IROp(
+        op_type, ev, operands,
+        attrs={"dst": dst, "src": src, **attrs},
+    ))
+    return ev
+
+
+def _buffer_name(x) -> str:
+    """Accept a Tensor / RegisterTensor-like wrapper or a raw buffer name."""
+    if hasattr(x, "_buffer_name"):
+        return x._buffer_name()
+    if hasattr(x, "_attrs"):
+        return x._attrs().get("buffer", str(x))
+    if isinstance(x, str):
+        return x
+    raise EnigmaError(
+        f"async_copy: expected a Tensor/buffer-name, got {type(x).__name__}"
+    )
+
+
+def async_copy_1d_d2t(dst, dst_offset, src, src_offset, count) -> IRValue:
+    """1D async copy: device buffer -> threadgroup buffer."""
+    _require_m3_runtime("async_copy_1d_d2t")
+    return _async_copy_record(
+        "async_copy_1d_d2t",
+        _buffer_name(dst), _buffer_name(src),
+        [dst_offset, src_offset, count],
+        attrs={},
+    )
+
+
+def async_copy_1d_t2d(dst, dst_offset, src, src_offset, count) -> IRValue:
+    """1D async copy: threadgroup buffer -> device buffer."""
+    _require_m3_runtime("async_copy_1d_t2d")
+    return _async_copy_record(
+        "async_copy_1d_t2d",
+        _buffer_name(dst), _buffer_name(src),
+        [dst_offset, src_offset, count],
+        attrs={},
+    )
+
+
+def async_copy_2d_d2t(dst, dst_offset, dst_elements_per_row,
+                       src, src_offset, src_elements_per_row,
+                       tile_cols, tile_rows) -> IRValue:
+    """2D tile async copy: device -> threadgroup (rectangular, strided)."""
+    _require_m3_runtime("async_copy_2d_d2t")
+    return _async_copy_record(
+        "async_copy_2d_d2t",
+        _buffer_name(dst), _buffer_name(src),
+        [dst_offset, dst_elements_per_row,
+         src_offset, src_elements_per_row,
+         tile_cols, tile_rows],
+        attrs={},
+    )
+
+
+def async_copy_2d_t2d(dst, dst_offset, dst_elements_per_row,
+                       src, src_offset, src_elements_per_row,
+                       tile_cols, tile_rows) -> IRValue:
+    """2D tile async copy: threadgroup -> device."""
+    _require_m3_runtime("async_copy_2d_t2d")
+    return _async_copy_record(
+        "async_copy_2d_t2d",
+        _buffer_name(dst), _buffer_name(src),
+        [dst_offset, dst_elements_per_row,
+         src_offset, src_elements_per_row,
+         tile_cols, tile_rows],
+        attrs={},
+    )
+
+
+def async_copy_wait(*events) -> None:
+    """Block until the listed async-copy events complete.
+
+    Accepts any number of event IRValues. Lowers to
+    `air.wait_simdgroup_events`.
+    """
+    builder = _require_builder("async_copy_wait")
+    if not events:
+        return
+    # Flatten any tuples/lists passed in.
+    flat = []
+    for e in events:
+        if isinstance(e, (list, tuple)):
+            flat.extend(e)
+        else:
+            flat.append(e)
+    builder.record(IROp("async_copy_wait", None, list(flat)))
+
+
+# ---- Back-compat shims for the old surface ------------------------------
+
 def async_copy_to_threadgroup(
-    src: "Tensor", dst: "Tensor",
+    src, dst,
     count: int, src_offset=0, dst_offset=0,
 ) -> IRValue:
-    """Schedule an async copy from device to threadgroup memory (M3+ only).
-
-    Returns an opaque token ``IRValue`` that must be passed to
-    :func:`async_copy_wait`. Calling this on M1/M2 raises at runtime
-    when the kernel is launched.
-    """
-    _require_m3_runtime("async_copy_to_threadgroup")
-    builder = _require_builder("async_copy_to_threadgroup")
-    tok = builder.new_value("async_token")
-    builder.record(IROp(
-        "async_copy_to_threadgroup", tok,
-        [_ensure_ir(src_offset), _ensure_ir(dst_offset)],
-        attrs={
-            "src": src._attrs(), "dst": dst._attrs(),
-            "count": int(count),
-        },
-    ))
-    return tok
+    """Legacy entry point — equivalent to :func:`async_copy_1d_d2t`."""
+    return async_copy_1d_d2t(dst, dst_offset, src, src_offset, count)
 
 
 def async_copy_commit(token: IRValue) -> None:
-    """Commit a group of previously-issued async copies (M3+ only)."""
-    builder = _require_builder("async_copy_commit")
-    builder.record(IROp("async_copy_commit", None, [token]))
-
-
-def async_copy_wait(token: IRValue) -> None:
-    """Block until the async copy group completes (M3+ only)."""
-    builder = _require_builder("async_copy_wait")
-    builder.record(IROp("async_copy_wait", None, [token]))
+    """Legacy no-op: commit is implicit in this AIR-backed lowering."""
+    _ = token  # nothing to record
 
 
 # ============================================================================

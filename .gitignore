@@ -1,28 +1,52 @@
-# Reference repos (submodules / vendored)
+# =============================================================================
+# .gitignore — Enigma DSL
+# =============================================================================
+
+# --- Reference repos (submodules / vendored) ---
 cutlass/
 gpt-oss-metal-kernels/
 LLAIR/
 
-# Reference documents
+# --- Reference documents ---
 cute_layout.pdf
 metal_cute_lowering.excalidraw
 ENIGMA_DSL_IMPLEMENTATION_PLAN.md
 
-# Build artifacts
+# --- Python build / runtime artifacts ---
 enigma/_version.py
 *.dylib
 *.metallib
 *.air
 __pycache__/
+*.pyc
+*.pyo
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
-# Virtual environments
+# --- Wheel build / dist outputs ---
+build/
+dist/
+wheelhouse/
+*.whl
+
+# --- Virtual environments ---
 .venv/
 venv/
+.venv-*/
 
-# OS files
+# --- IDE / OS files ---
 .DS_Store
 .vscode/
+.idea/
 .env
 .clangd
 pyrightconfig.json
+*.swp
+*.swo
+
+# --- Misc local scratch ---
+.cache/
+*.log
+tmp/

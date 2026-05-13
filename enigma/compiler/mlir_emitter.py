@@ -624,6 +624,40 @@ def _build_module(builder: KernelBuilder, vec_width: int = 0):
                         ssa[op.result.name] = en.AtomicCompareExchangeWeakOp(
                             buf, [idx], expected, desired, so, fo).result
 
+                    # --- Async copy (AIR intrinsics) ---
+                    elif t in ("async_copy_1d_d2t", "async_copy_1d_t2d"):
+                        dst = buf_of[op.attrs["dst"]]
+                        src = buf_of[op.attrs["src"]]
+                        dst_off = _to_index(ssa[op.operands[0].name])
+                        src_off = _to_index(ssa[op.operands[1].name])
+                        count = _to_index(ssa[op.operands[2].name])
+                        cls = (en.AsyncCopy1dD2TOp
+                               if t == "async_copy_1d_d2t"
+                               else en.AsyncCopy1dT2DOp)
+                        ssa[op.result.name] = cls(
+                            dst, dst_off, src, src_off, count).result
+
+                    elif t in ("async_copy_2d_d2t", "async_copy_2d_t2d"):
+                        dst = buf_of[op.attrs["dst"]]
+                        src = buf_of[op.attrs["src"]]
+                        dst_off = _to_index(ssa[op.operands[0].name])
+                        dst_epr = _to_index(ssa[op.operands[1].name])
+                        src_off = _to_index(ssa[op.operands[2].name])
+                        src_epr = _to_index(ssa[op.operands[3].name])
+                        tcols = _to_index(ssa[op.operands[4].name])
+                        trows = _to_index(ssa[op.operands[5].name])
+                        cls = (en.AsyncCopy2dD2TOp
+                               if t == "async_copy_2d_d2t"
+                               else en.AsyncCopy2dT2DOp)
+                        ssa[op.result.name] = cls(
+                            dst, dst_off, dst_epr,
+                            src, src_off, src_epr,
+                            tcols, trows).result
+
+                    elif t == "async_copy_wait":
+                        evs = [ssa[o.name] for o in op.operands]
+                        en.AsyncCopyWaitOp(evs)
+
                     elif t == "threadgroup_barrier":
                         flags = ir.IntegerAttr.get(
                             i32, _MEM_FLAGS[op.attrs.get("mem_flags", "mem_threadgroup")])
