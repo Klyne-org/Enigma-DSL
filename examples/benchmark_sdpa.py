@@ -165,11 +165,11 @@ mO = Tensor("O", 3, "float", enigma.Layout(NUM_TOKENS * NUM_Q_HEADS * HEAD_DIM, 
 
 print("Compiling Enigma SDPA (gpt-oss layout)...")
 enigma_compiled = enigma.compile(sdpa_jit, mQ, mKV, mScale, mO)
-enigma_compiled.export_metal(os.path.join(os.path.dirname(__file__), "sdpa_enigma.metal"))
+enigma_compiled.export_metal(os.path.join(os.path.dirname(__file__), "metal", "sdpa_enigma.metal"))
 
 print("Compiling gpt-oss SDPA...")
 hw_dir = tempfile.mkdtemp()
-hw_metal = os.path.join(os.path.dirname(__file__), "sdpa_handwritten.metal")
+hw_metal = os.path.join(os.path.dirname(__file__), "metal", "sdpa_handwritten.metal")
 hw_air = os.path.join(hw_dir, "sdpa.air")
 hw_metallib = os.path.join(hw_dir, "sdpa.metallib")
 subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-c", hw_metal, "-o", hw_air],

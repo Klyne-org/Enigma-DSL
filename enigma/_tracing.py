@@ -1467,10 +1467,6 @@ def register_tensor(shape, dtype: str = "float", fill=0) -> RegisterTensor:
 # below for back-compat; they now lower to the 1D variant.
 
 
-class _AsyncCopyUnavailable(Exception):
-    pass
-
-
 def _require_m3_runtime(feature: str) -> None:
     """Check device capabilities at trace time (best-effort)."""
     try:

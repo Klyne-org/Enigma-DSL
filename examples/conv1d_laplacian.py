@@ -2,24 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Klyne Research
 
-"""1D Laplacian stencil — Enigma DSL vs handwritten Metal vs numpy.
+"""1D Laplacian stencil: (f[i-1] - 2*f[i] + f[i+1]) / h²
 
-The discrete 1D Laplacian is the workhorse of finite-difference PDE solvers
-(heat equation, wave equation, diffusion). For a 1D field f sampled on a
-uniform grid with spacing h, the second derivative is approximated by the
-3-point stencil:
-
-    (∇²f)[i] ≈ (f[i-1] - 2*f[i] + f[i+1]) / h²
-
-Boundary cells are kept at zero (Dirichlet BC) for simplicity. This script
-runs three implementations on the same input and checks they agree:
-
-  * `laplacian_dsl`     - written in Enigma's @kernel DSL (this is the demo)
-  * handwritten Metal   - shipped as `conv1d_laplacian_handwritten.metal`,
-                          shown for comparison only
-  * numpy reference     - ground truth for correctness
-
-All three should produce identical results to within float32 precision.
+Enigma DSL kernel vs numpy reference. Boundary: Dirichlet (zero).
 """
 
 import os
@@ -32,7 +17,7 @@ import enigma
 
 
 N = 4096
-H = 1.0  # unit grid spacing; rescale if you want a physical domain
+H = 1.0
 INV_H2 = np.float32(1.0 / (H * H))
 
 
@@ -52,13 +37,13 @@ def laplacian_dsl(F: enigma.f32, Out: enigma.f32):
         Out[i] = (left - two * center + right) * inv_h2
 
 
-def numpy_reference(f: np.ndarray, inv_h2: float) -> np.ndarray:
+def numpy_reference(f, inv_h2):
     out = np.zeros_like(f)
     out[1:-1] = (f[:-2] - 2.0 * f[1:-1] + f[2:]) * inv_h2
     return out
 
 
-def main() -> None:
+def main():
     print("Compiling laplacian_dsl kernel...")
     compiled = enigma.compile(laplacian_dsl)
 
@@ -71,13 +56,8 @@ def main() -> None:
     f = rng.standard_normal(N).astype(np.float32)
 
     runtime = enigma.MetalRuntime()
-    raw = runtime.execute(
-        compiled,
-        inputs=[f],
-        output_size=N * 4,
-        grid=(N, 1, 1),
-        threads=(min(N, 256), 1, 1),
-    )
+    raw = runtime.execute(compiled, inputs=[f], output_size=N * 4,
+                          grid=(N, 1, 1), threads=(min(N, 256), 1, 1))
     out_gpu = np.frombuffer(raw, dtype=np.float32)
     out_ref = numpy_reference(f, float(INV_H2))
 

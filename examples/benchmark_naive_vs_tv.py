@@ -9,8 +9,6 @@ import numpy as np
 import enigma
 from enigma.tensor import Tensor, tensor_composition, tensor_zipped_divide
 
-# --- Naive scalar kernel ---
-
 
 @enigma.kernel
 def vector_add_naive(A: enigma.f32, B: enigma.f32, C: enigma.f32):
@@ -20,12 +18,7 @@ def vector_add_naive(A: enigma.f32, B: enigma.f32, C: enigma.f32):
 
 naive_compiled = enigma.compile(vector_add_naive)
 
-# --- Same kernel but emitted with float4* buffer types ---
-
 vec4_compiled = enigma.compile(vector_add_naive, vec_width=4)
-
-# --- TV layout kernel ---
-
 
 @enigma.kernel
 def add_kernel_tv(gA, gB, gC, tv_layout, tiler):
@@ -67,12 +60,8 @@ mB = Tensor("B", 1, "float", enigma.Layout((M, N), (N, 1)))
 mC = Tensor("C", 2, "float", enigma.Layout((M, N), (N, 1)))
 tv_compiled = enigma.compile(elementwise_add_tv, mA, mB, mC)
 
-# --- Print generated Metal for vec4 ---
-
 print("float4 kernel (generated):")
 print(vec4_compiled.metal_source)
-
-# --- Verify ---
 
 print(f"Tensor: {M}x{N} float32 ({TOTAL * 4 / 1e6:.0f} MB)")
 
@@ -108,8 +97,6 @@ tv_out = np.frombuffer(
 np.testing.assert_allclose(tv_out, expected, rtol=1e-5)
 print("TV:       correct")
 
-# --- Benchmark ---
-
 WARMUP, ITERS = 50, 1000
 
 kernels = [
@@ -125,7 +112,6 @@ kernels = [
 
 preps = [(n, runtime.prepare(k, [A_np, B_np], TOTAL * 4), g, t) for n, k, g, t in kernels]
 
-# Global warmup: ramp GPU clocks on every kernel before any timing starts.
 for _ in range(WARMUP):
     for _, p, g, t in preps:
         p.dispatch(grid=g, threads=t)

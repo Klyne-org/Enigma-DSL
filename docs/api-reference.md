@@ -41,6 +41,7 @@ and dispatches them on the GPU through MLIR and the Metal Shading Language.
 31. [arch Namespace](#31-arch-namespace)
 32. [Tuple Utilities](#32-tuple-utilities)
 33. [Errors](#33-errors)
+34. [Async Copy (Experimental)](#34-async-copy-experimental)
 
 ---
 
@@ -1176,6 +1177,61 @@ except enigma.EnigmaError as e:
 - Metal compilation failures (`xcrun metal` / `xcrun metallib`)
 - GPU dispatch failures (no Metal device, command buffer errors)
 - Missing Xcode Command Line Tools
+
+---
+
+## 34. Async Copy (Experimental)
+
+Async device-threadgroup copy via AIR simdgroup intrinsics. Requires M3+ hardware.
+
+> **Status**: Experimental. Uses `__asm("air.simdgroup_async_copy_*")` extern declarations to bind to undocumented AIR intrinsics (same technique as [percisely.xyz/gemm](https://percisely.xyz/gemm)). Apple may change or remove access to these intrinsics at any time.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `enigma.async_copy_1d_d2t(dst, dst_offset, src, src_offset, count)` | 1D async copy: device → threadgroup. Returns event. |
+| `enigma.async_copy_1d_t2d(dst, dst_offset, src, src_offset, count)` | 1D async copy: threadgroup → device. Returns event. |
+| `enigma.async_copy_2d_d2t(dst, dst_off, dst_epr, src, src_off, src_epr, tile_cols, tile_rows)` | 2D tile async copy: device → threadgroup. Returns event. |
+| `enigma.async_copy_2d_t2d(dst, dst_off, dst_epr, src, src_off, src_epr, tile_cols, tile_rows)` | 2D tile async copy: threadgroup → device. Returns event. |
+| `enigma.async_copy_wait(*events)` | Block until listed async-copy events complete. |
+
+### Parameters
+
+- **dst, src**: `Tensor`, `RegisterTensor`, or buffer name string
+- **dst_offset, src_offset**: Element offset into the buffer
+- **count**: Number of elements (1D)
+- **dst_epr, src_epr**: Elements per row (2D stride)
+- **tile_cols, tile_rows**: Tile dimensions (2D)
+- **events**: Event handles returned by the copy functions
+
+### Example
+
+```python
+@enigma.kernel
+def tiled_load(A: enigma.f32, B: enigma.f32):
+    tile = enigma.threadgroup_alloc("float", 64)
+    c0 = enigma.metal_cast(0, "uint")
+    cnt = enigma.metal_cast(64, "uint")
+
+    ev = enigma.async_copy_1d_d2t(tile, c0, A, c0, cnt)
+    enigma.async_copy_wait(ev)
+    enigma.barrier()
+
+    # 2D variant
+    epr = enigma.metal_cast(8, "uint")
+    ev2 = enigma.async_copy_2d_d2t(tile, c0, epr, A, c0, cnt,
+                                    enigma.metal_cast(8, "uint"),
+                                    enigma.metal_cast(8, "uint"))
+    enigma.async_copy_wait(ev2)
+```
+
+### Legacy aliases
+
+| Function | Maps to |
+|---|---|
+| `enigma.async_copy_to_threadgroup(src, dst, count, src_offset, dst_offset)` | `async_copy_1d_d2t` |
+| `enigma.async_copy_commit(token)` | No-op (commit is implicit) |
 
 ---
 

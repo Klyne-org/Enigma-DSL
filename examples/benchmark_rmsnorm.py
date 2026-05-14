@@ -90,11 +90,11 @@ mOut = Tensor("Out", 2, "float", enigma.Layout((ROWS, N), (N, 1)))
 
 print("\nCompiling Enigma RMSNorm...")
 enigma_compiled = enigma.compile(rmsnorm_jit, mX, mW, mOut)
-enigma_compiled.export_metal(os.path.join(os.path.dirname(__file__), "rmsnorm_enigma.metal"))
+enigma_compiled.export_metal(os.path.join(os.path.dirname(__file__), "metal", "rmsnorm_enigma.metal"))
 
 print("Compiling handwritten RMSNorm...")
 hw_dir = tempfile.mkdtemp(prefix="rmsnorm_hw_")
-hw_metal = os.path.join(os.path.dirname(__file__), "rmsnorm_handwritten.metal")
+hw_metal = os.path.join(os.path.dirname(__file__), "metal", "rmsnorm_handwritten.metal")
 hw_air = os.path.join(hw_dir, "rmsnorm.air")
 hw_metallib = os.path.join(hw_dir, "rmsnorm.metallib")
 subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-c", hw_metal, "-o", hw_air],
