@@ -41,20 +41,92 @@ reach the GPU.
 
 ## Install
 
-Requirements: Apple Silicon Mac, Xcode Command Line Tools, Python 3.11 / 3.12 / 3.13.
+Requirements: Apple Silicon Mac (M1 through M5), macOS 14 / 15 (or any
+newer release), Python 3.11 / 3.12 / 3.13.
 
-Self-contained wheels (DSL + MLIR dialect bundled into a single install)
-ship in `wheelhouse/`, one per Python version.
+```bash
+pip install enigma-dsl
+```
+
+That single command pulls a self-contained wheel that bundles the Python
+DSL **and** the native MLIR dialect (libLLVM, libMLIRPythonCAPI, the
+Enigma dialect `.so`) — no separate steps, no LLVM toolchain on your
+machine. `pip` picks the right wheel for your Python version and macOS
+version automatically.
+
+The release ships **six** wheels: 3 Python versions × 2 macOS deployment
+targets (14.0 and 15.0). macOS 14-tagged wheels run on macOS 14, 15, 26
+and every future version; macOS 15-tagged wheels are picked first on
+macOS 15+ hosts because pip prefers the most specific match.
+
+Quick verification:
+
+```bash
+python -c "import enigma; print(enigma.__version__)"
+# 0.1.1
+```
+
+Then jump to [Hello, Metal](#hello-metal) below.
+
+### Building from source
+
+You only need this path if you are hacking on the dialect itself, or
+porting to a future LLVM. The pipeline is **two stages** — dialect
+(native, C++/MLIR) first, then the Python DSL on top of it.
 
 ```bash
 git clone https://github.com/Klyne-Research/Enigma-DSL.git
 cd Enigma-DSL
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install wheelhouse/enigma_dsl-*-cp312-cp312-*.whl numpy
-python examples/vector_add.py
+git submodule update --init --recursive   # pulls Enigma-Dialect
+
+# Stage 1: build LLVM 22.x + MLIR (one-time, ~30-90 min).
+# Produces ~/.local/enigma-llvm/ — isolated from any Homebrew LLVM.
+bash Enigma-Dialect/scripts/build_llvm.sh
+
+# Stage 2: build the merged wheel (DSL + dialect) for the Python
+# version of your choice. Repeat the --python flag for each version.
+./build_all.sh --python 3.12
+
+# The wheel lands in wheelhouse/. The script also creates
+# .venv-py3.12, installs into it, and runs pytest by default.
 ```
 
-Swap `cp312` for `cp311` or `cp313` to match your Python interpreter.
+What `build_all.sh` actually does, in order:
+
+1. Sources `~/.local/enigma-llvm/activate.sh` to put the local MLIR
+   on `MLIR_DIR` / `LLVM_DIR`.
+2. Builds `enigma-dsl` as a pure-Python wheel (`py3-none-any`).
+3. Builds `enigma-dialect` as a native wheel (`cpXY-cpXY-macosx_*_arm64`)
+   — one per Python version. This invokes `scikit-build-core` which in
+   turn drives CMake against the local LLVM build.
+4. Fixes Mach-O rpaths and re-codesigns the bundled dylibs so they
+   load from `@loader_path`.
+5. Merges the two wheels into a single `enigma_dsl-*-cpXY-cpXY-*.whl`
+   containing both `enigma/` and `mlir/` packages — what users
+   eventually `pip install` from PyPI.
+
+Common variations:
+
+```bash
+# Multi-version build (publish-ready):
+MACOSX_DEPLOYMENT_TARGET=14.0 \
+  ./build_all.sh --python 3.11 --python 3.12 --python 3.13 \
+                 --no-test --no-install --clean
+
+# Build the dialect against an existing LLVM in a non-default location:
+MLIR_DIR=/path/to/lib/cmake/mlir \
+  ./build_all.sh --python 3.12
+
+# Build only the dialect (skip Python DSL):
+./build_all.sh --python 3.12 --skip-dsl
+
+# Build only the DSL (reuse a previously built dialect wheel):
+./build_all.sh --python 3.12 --skip-dialect
+```
+
+The LLVM step is the expensive one. After the first `build_llvm.sh`
+finishes, every subsequent `build_all.sh` reuses it — incremental
+dialect builds are ~3-5 min per Python.
 
 ## Hello, Metal
 
@@ -140,6 +212,11 @@ bash Enigma-Dialect/test/run_tests.sh --gpu          # plus GPU dispatch
 MIT. See [`LICENSE`](LICENSE).
 
 ## Versions
+
+**v0.1.1** — first PyPI release. Six merged wheels published
+(`enigma_dsl-0.1.1-cp{311,312,313}-cp{311,312,313}-macosx_{14_0,15_0}_arm64`).
+Installable via `pip install enigma-dsl` on any Apple Silicon Mac
+running macOS 14+. Project page: <https://pypi.org/project/enigma-dsl/>.
 
 **v0.1.0** — initial release. Layout algebra engine (composition,
 complement, coalesce, zipped divide, recast, TV layout construction).
