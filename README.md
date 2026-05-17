@@ -8,6 +8,12 @@
   <sub>where Python meets Metal, and layouts become algebra</sub>
 </p>
 
+<p align="center">
+  <a href="https://klyne-research.mintlify.app/">📖 Documentation</a> &nbsp;·&nbsp;
+  <a href="https://pypi.org/project/enigma-dsl/">📦 PyPI</a> &nbsp;·&nbsp;
+  <a href="https://github.com/Klyne-org/Enigma-DSL">⭐ GitHub</a>
+</p>
+
 ---
 
 Enigma is a Python DSL for writing Apple Metal GPU compute kernels. You write
