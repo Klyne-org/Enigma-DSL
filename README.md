@@ -8,6 +8,12 @@
   <sub>where python meets metal, and layouts become algebra</sub>
 </p>
 
+<p align="center">
+  <a href="https://klyne-research.mintlify.app/">📖 Documentation</a> &nbsp;·&nbsp;
+  <a href="https://pypi.org/project/enigma-dsl/">📦 PyPI</a> &nbsp;·&nbsp;
+  <a href="https://github.com/Klyne-org/Enigma-DSL">⭐ GitHub</a>
+</p>
+
 In 1945, an Enigma machine sank to the floor of the Baltic Sea. For decades it sat there, its rotors locked, its wiring intact, waiting. When divers finally pulled it from the silt, the mechanism still worked. The genius was never in the shell. It was in the rotors, the wiring, the algebra of permutations hidden inside.
 
 Enigma DSL is built on the same principle. Inspired by NVIDIA's CuTe DSL, which brought layout algebra and tiling calculus to CUDA, Enigma brings the same mathematical framework to Apple Metal. Where CuTe targets tensor cores and warps on NVIDIA GPUs, Enigma targets simdgroups and threadgroups on Apple Silicon. The layout algebra is the same. The target is different. You write a Python function. Underneath, the algebra computes how threads map to memory, how tiles partition a tensor, how values flow through a simdgroup. The Python traces into an IR. The IR emits Metal C++. The Metal compiles to GPU machine code. Your function runs on Apple Silicon at hardware bandwidth limits. The surface is clean. The machinery is exact.

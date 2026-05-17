@@ -6,7 +6,7 @@ import inspect
 import threading
 from typing import Callable, Optional, Tuple
 
-from .._tracing import IROp, IRValue, KernelBuilder, TracingTensor
+from .._tracing import IROp, KernelBuilder, TracingTensor
 from ..typing import Numeric, Scalar
 
 _jit_local = threading.local()

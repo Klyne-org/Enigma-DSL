@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 
 import enigma
-from enigma._tracing import KernelBuilder, TracingTensor, IROp
+from enigma._tracing import KernelBuilder, TracingTensor
 
 # ============================================================================
 # Helper: walk all ops (including nested regions) and collect op types
