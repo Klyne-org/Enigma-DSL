@@ -213,6 +213,49 @@ python examples/benchmark_rmsnorm.py    # benchmarks Enigma vs handwritten
 python examples/showcase_attention.py   # FlashAttention forward
 ```
 
+## Benchmarks
+
+Measured on a **MacBook Air M4** (8-core GPU, 16 GB unified memory,
+120 GB/s memory bandwidth, ~3.6 TFLOPS FP32 theoretical peak). All
+kernels pass correctness against a NumPy reference.
+
+### SDPA — `examples/benchmark_sdpa.py`
+
+128 tokens × 512 KV × 64 Q-heads × 8 KV-heads, head_dim=64, 4 simdgroups,
+1.09 GFLOPs per dispatch.
+
+| Implementation | Latency | Throughput | % of FP32 peak |
+|---|---|---|---|
+| **Enigma DSL** (gpt-oss layout, 4 sg) | **1831 µs** | **0.598 TFLOPS** | ~16.6% |
+| gpt-oss handwritten Metal (4 sg) | 1987 µs | 0.551 TFLOPS | ~15.3% |
+
+Enigma is **1.09× faster** than the handwritten Metal baseline. The ~17%
+of FP32 peak is expected for online-softmax attention on Apple GPUs —
+moving to fp16 + simdgroup matrix would unlock more.
+
+### Qwen3-0.6B fused decode — `examples/qwen_megakernel.py`
+
+Single-dispatch megakernel: RMSNorm → QKV proj → head-norm + RoPE → SDPA
+→ O-proj → SwiGLU → down-proj, all in one threadgroup.
+
+| Metric | Value |
+|---|---|
+| Throughput | **92.6 tok/s** |
+| Latency | 10.79 ms/tok |
+| Compile time | 0.08 s (14 KB of generated MSL) |
+| Correctness | `max|err| = 3.87e-06` vs NumPy |
+
+Competitive with `llama.cpp` on the same hardware for a 0.6B model — and
+the entire decode step is one kernel launch, no host round-trips between
+phases.
+
+Reproduce:
+
+```bash
+python examples/benchmark_sdpa.py
+python examples/qwen_megakernel.py
+```
+
 ## What's in the box
 
 - **Kernel surface**: arithmetic, unary/binary/ternary float math, integer
