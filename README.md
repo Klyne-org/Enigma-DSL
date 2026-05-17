@@ -66,7 +66,46 @@ python -c "import enigma; print(enigma.__version__)"
 # 0.1.1
 ```
 
-Then jump to [Hello, Metal](#hello-metal) below.
+### 30-second example
+
+Save as `add.py` and run with `python add.py` — no setup beyond
+`pip install enigma-dsl numpy`. This is the shortest end-to-end
+trace → MSL codegen → GPU dispatch you can write.
+
+```python
+import numpy as np
+import enigma
+
+@enigma.kernel
+def add(A: enigma.f32, B: enigma.f32, C: enigma.f32):
+    i = enigma.thread_position_in_grid
+    C[i] = A[i] + B[i]
+
+compiled = enigma.compile(add)
+
+N = 1024
+a = np.random.randn(N).astype(np.float32)
+b = np.random.randn(N).astype(np.float32)
+
+raw = enigma.MetalRuntime().execute(
+    compiled, inputs=[a, b], output_size=N * 4,
+    grid=(N, 1, 1), threads=(256, 1, 1),
+)
+c = np.frombuffer(raw, dtype=np.float32)
+print("max |error| =", float(np.max(np.abs(c - (a + b)))))   # 0.0
+```
+
+What ran:
+
+1. `@enigma.kernel` traced the Python function into MLIR (the `enigma`
+   dialect).
+2. `enigma.compile` lowered it to Metal Shading Language, then ran it
+   through `xcrun metal` → AIR → `xcrun metallib` → `.metallib`.
+3. `MetalRuntime().execute(...)` mmap'd the `.metallib`, allocated GPU
+   buffers, dispatched the compute pass, and returned the result bytes.
+
+For richer examples — RMSNorm, FlashAttention, 1D Laplacian — see the
+[Showcase kernels](#showcase-kernels) section below.
 
 ### Building from source
 
