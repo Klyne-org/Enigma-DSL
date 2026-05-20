@@ -126,26 +126,28 @@ porting to a future LLVM. The pipeline is **two stages** — dialect
 (native, C++/MLIR) first, then the Python DSL on top of it.
 
 ```bash
-git clone https://github.com/Klyne-Research/Enigma-DSL.git
+git clone https://github.com/Klyne-org/Enigma-DSL.git
 cd Enigma-DSL
 git submodule update --init --recursive   # pulls Enigma-Dialect
 
 # Stage 1: build LLVM 22.x + MLIR (one-time, ~30-90 min).
 # Produces ~/.local/enigma-llvm/ — isolated from any Homebrew LLVM.
-bash Enigma-Dialect/scripts/build_llvm.sh
+bash scripts/build_llvm.sh
 
 # Stage 2: build the merged wheel (DSL + dialect) for the Python
 # version of your choice. Repeat the --python flag for each version.
-./build_all.sh --python 3.12
+bash scripts/build_all.sh --python 3.12
 
-# The wheel lands in wheelhouse/. The script also creates
-# .venv-py3.12, installs into it, and runs pytest by default.
+# The wheel lands in wheelhouse/. The script also creates a venv
+# (.venv for 3.12, .venv-py<X.Y> otherwise), installs into it, and
+# runs pytest by default.
 ```
 
-What `build_all.sh` actually does, in order:
+What `scripts/build_all.sh` actually does, in order:
 
 1. Sources `~/.local/enigma-llvm/activate.sh` to put the local MLIR
-   on `MLIR_DIR` / `LLVM_DIR`.
+   on `MLIR_DIR` / `LLVM_DIR` (skipped if `MLIR_DIR` is already set,
+   or if `--skip-dialect` is passed).
 2. Builds `enigma-dsl` as a pure-Python wheel (`py3-none-any`).
 3. Builds `enigma-dialect` as a native wheel (`cpXY-cpXY-macosx_*_arm64`)
    — one per Python version. This invokes `scikit-build-core` which in
@@ -155,29 +157,41 @@ What `build_all.sh` actually does, in order:
 5. Merges the two wheels into a single `enigma_dsl-*-cpXY-cpXY-*.whl`
    containing both `enigma/` and `mlir/` packages — what users
    eventually `pip install` from PyPI.
+6. Creates a per-Python venv, installs the merged wheel into it, and
+   runs `pytest tests/` (steps 5–6 are skipped by the corresponding
+   `--no-merge` / `--no-install` / `--no-test` flags).
+
+The macOS deployment target defaults to the host's OS major (Darwin 24
+→ macOS 15.0, Darwin 23 → macOS 14.0); override it with `--macos`.
 
 Common variations:
 
 ```bash
 # Multi-version build (publish-ready):
-MACOSX_DEPLOYMENT_TARGET=14.0 \
-  ./build_all.sh --python 3.11 --python 3.12 --python 3.13 \
-                 --no-test --no-install --clean
+bash scripts/build_all.sh --python 3.11 --python 3.12 --python 3.13 \
+                          --macos 14.0 --no-test --no-install --clean
 
 # Build the dialect against an existing LLVM in a non-default location:
 MLIR_DIR=/path/to/lib/cmake/mlir \
-  ./build_all.sh --python 3.12
+  bash scripts/build_all.sh --python 3.12
 
 # Build only the dialect (skip Python DSL):
-./build_all.sh --python 3.12 --skip-dsl
+bash scripts/build_all.sh --python 3.12 --skip-dsl
 
 # Build only the DSL (reuse a previously built dialect wheel):
-./build_all.sh --python 3.12 --skip-dialect
+bash scripts/build_all.sh --python 3.12 --skip-dialect
+
+# Keep the two wheels separate instead of merging them:
+bash scripts/build_all.sh --python 3.12 --no-merge
+
+# Write wheels to a custom directory instead of ./wheelhouse:
+bash scripts/build_all.sh --python 3.12 --out /tmp/wheels
 ```
 
 The LLVM step is the expensive one. After the first `build_llvm.sh`
 finishes, every subsequent `build_all.sh` reuses it — incremental
-dialect builds are ~3-5 min per Python.
+dialect builds are ~3-5 min per Python. Pass `--clean` to wipe the
+build caches and rebuild from scratch.
 
 ## Hello, Metal
 
