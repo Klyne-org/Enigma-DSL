@@ -25,7 +25,7 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 
-LLVM_VERSION="${LLVM_VERSION:-llvmorg-18.1.8}"   # pinned release tag
+LLVM_VERSION="${LLVM_VERSION:-llvmorg-22.1.0}"   # pinned release tag
 PREFIX="${ENIGMA_LLVM_PREFIX:-$HOME/.local/enigma-llvm}"
 SRC_DIR="$PREFIX/src/llvm-project"
 BUILD_DIR="$PREFIX/build"
