@@ -25,7 +25,9 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 
-LLVM_VERSION="${LLVM_VERSION:-llvmorg-22.1.0}"   # pinned release tag
+# LLVM 22.x uses nanobind for MLIR Python bindings (pybind11 was dropped).
+# The dialect's EnigmaModule.cpp uses NanobindAdaptors.h accordingly.
+LLVM_VERSION="${LLVM_VERSION:-llvmorg-22.1.3}"
 PREFIX="${ENIGMA_LLVM_PREFIX:-$HOME/.local/enigma-llvm}"
 SRC_DIR="$PREFIX/src/llvm-project"
 BUILD_DIR="$PREFIX/build"
@@ -76,22 +78,21 @@ CXX="$(xcrun --find clang++)"
 SDKROOT="$(xcrun --show-sdk-path)"
 export CC CXX SDKROOT
 
-# Pick a Python. MLIR 18.1.8 bindings need Python 3.10–3.12 (3.13+ is too new).
+# Pick a Python. MLIR 22.x bindings work with Python 3.11–3.13.
 # We create a dedicated venv under $PREFIX so we don't fight Homebrew's
 # PEP 668 restriction and don't pollute the system Python.
 VENV_DIR="$PREFIX/venv"
 
 pick_python() {
-  for candidate in python3.12 python3.11 python3.10; do
+  for candidate in python3.12 python3.13 python3.11; do
     if command -v "$candidate" >/dev/null 2>&1; then
       echo "$(command -v "$candidate")"
       return 0
     fi
   done
-  # Fallback: system python3 only if version is in range
   local v
   v="$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")' 2>/dev/null || echo 0)"
-  if [[ "$v" -ge 310 && "$v" -le 312 ]]; then
+  if [[ "$v" -ge 311 && "$v" -le 313 ]]; then
     echo "$(command -v python3)"
     return 0
   fi
@@ -99,10 +100,17 @@ pick_python() {
 }
 
 HOST_PYTHON="$(pick_python)" || {
-  echo "error: need Python 3.10, 3.11, or 3.12 for MLIR bindings." >&2
+  echo "error: need Python 3.11-3.13 for MLIR bindings." >&2
   echo "       install via: brew install python@3.12" >&2
   exit 1
 }
+
+# If an old venv exists from a previous (python 3.12 / LLVM 18.x) install,
+# blow it away on --clean so the new nanobind deps land cleanly.
+if [[ $CLEAN -eq 1 && -d "$VENV_DIR" ]]; then
+  echo "cleaning existing venv at $VENV_DIR"
+  rm -rf "$VENV_DIR"
+fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "creating venv at $VENV_DIR using $HOST_PYTHON"
@@ -113,9 +121,11 @@ PYTHON="$VENV_DIR/bin/python3"
 PYTHON_VERSION="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 
 "$PYTHON" -m pip install --upgrade pip wheel setuptools
-# Pin pybind11 to 2.13.x — MLIR 18.1.8 uses def_property with keep_alive,
-# which was removed in pybind11 3.x. Same reasoning for nanobind.
-"$PYTHON" -m pip install "pybind11<3" "nanobind<2" numpy PyYAML
+# LLVM 22.x Python bindings use nanobind. pybind11 is no longer required by
+# MLIR itself, but we keep a recent version installed because out-of-tree
+# CAPI libraries may still pull it in during tablegen-generated code. Pin to
+# a modern release that supports Python 3.13.
+"$PYTHON" -m pip install "nanobind>=2.0" "pybind11>=2.12" numpy PyYAML
 
 echo "──────────────────────────────────────────────────────────────"
 echo " LLVM version : $LLVM_VERSION"
@@ -131,8 +141,18 @@ echo "────────────────────────�
 # ---------------------------------------------------------------------------
 
 if [[ $CLEAN -eq 1 ]]; then
-  echo "cleaning $PREFIX"
+  echo "cleaning $BUILD_DIR and $INSTALL_DIR"
   rm -rf "$BUILD_DIR" "$INSTALL_DIR"
+fi
+
+# Auto-wipe if a prior configure resolved a different Python than our venv
+# (stale .so files built against the wrong ABI cause import failures).
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+  cached_py="$(grep -E '^_Python3_EXECUTABLE:INTERNAL=' "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2)"
+  if [[ -n "$cached_py" && "$cached_py" != "$PYTHON" ]]; then
+    echo "python mismatch in cache ($cached_py != $PYTHON); wiping build/install"
+    rm -rf "$BUILD_DIR" "$INSTALL_DIR"
+  fi
 fi
 
 mkdir -p "$PREFIX/src"
@@ -146,8 +166,15 @@ if [[ ! -d "$SRC_DIR/.git" ]]; then
   git clone --depth 1 --branch "$LLVM_VERSION" \
     https://github.com/llvm/llvm-project.git "$SRC_DIR"
 else
-  echo "source already present at $SRC_DIR"
-  (cd "$SRC_DIR" && git fetch --depth 1 origin tag "$LLVM_VERSION" && git checkout "$LLVM_VERSION")
+  # Check current tag; if it doesn't match the target, update.
+  current_tag="$(cd "$SRC_DIR" && git describe --tags --exact-match 2>/dev/null || echo '')"
+  if [[ "$current_tag" != "$LLVM_VERSION" ]]; then
+    echo "updating llvm-project $current_tag -> $LLVM_VERSION"
+    (cd "$SRC_DIR" && git fetch --depth 1 origin "refs/tags/$LLVM_VERSION:refs/tags/$LLVM_VERSION" \
+      && git checkout "$LLVM_VERSION")
+  else
+    echo "source already at $LLVM_VERSION in $SRC_DIR"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -180,6 +207,17 @@ cmake -S "$SRC_DIR/llvm" -B "$BUILD_DIR" -G Ninja \
   -DLLVM_LINK_LLVM_DYLIB=ON \
   -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
   -DPython3_EXECUTABLE="$PYTHON" \
+  -DPython3_ROOT_DIR="$VENV_DIR" \
+  -DPython3_FIND_VIRTUALENV=ONLY \
+  -DPython3_FIND_STRATEGY=LOCATION \
+  -DPython3_FIND_REGISTRY=NEVER \
+  -DPython3_FIND_FRAMEWORK=NEVER \
+  -DPython_EXECUTABLE="$PYTHON" \
+  -DPython_ROOT_DIR="$VENV_DIR" \
+  -DPython_FIND_VIRTUALENV=ONLY \
+  -DPython_FIND_STRATEGY=LOCATION \
+  -DPython_FIND_REGISTRY=NEVER \
+  -DPython_FIND_FRAMEWORK=NEVER \
   -DLLVM_PARALLEL_LINK_JOBS=2
 
 # ---------------------------------------------------------------------------
@@ -227,7 +265,6 @@ source "$PREFIX/activate.sh"
 echo -n "  llvm-config: "; "$INSTALL_DIR/bin/llvm-config" --version
 echo -n "  mlir-opt:    "; "$INSTALL_DIR/bin/mlir-opt" --version | head -n1
 
-# The critical test: do the Python bindings import?
 if "$PYTHON" -c "from mlir import ir; ctx = ir.Context(); print('mlir.ir OK')"; then
   echo "  python bindings: OK"
 else
