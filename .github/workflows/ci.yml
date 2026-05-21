@@ -20,10 +20,11 @@ jobs:
       - run: ruff format --check tests/portable
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -31,6 +32,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install -e ".[dev]" --system
+        run: |
+          PY_TAG="cp${{ matrix.python-version }}"
+          PY_TAG="${PY_TAG//./}"
+          LATEST=$(gh release view --repo Klyne-org/Enigma-DSL --json tagName --jq '.tagName')
+          gh release download "$LATEST" --repo Klyne-org/Enigma-DSL \
+            --pattern "enigma_dsl-*-${PY_TAG}-${PY_TAG}-macosx_14_0_arm64.whl" \
+            --dir /tmp/wheels
+          pip install /tmp/wheels/*.whl pytest
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Test portable suite
         run: pytest tests/portable -v
