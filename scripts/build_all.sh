@@ -31,9 +31,9 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIALECT_DIR="$ROOT/Enigma-Dialect"
-DSL_DIR="$ROOT/Enigma-DSL"
+DSL_DIR="$ROOT"
 WHEELHOUSE_DEFAULT="$ROOT/wheelhouse"
 
 PY_VERSIONS=()
