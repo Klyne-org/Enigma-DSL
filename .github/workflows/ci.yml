@@ -32,6 +32,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install -e ".[dev]" --system
+        run: |
+          PY_TAG="cp${{ matrix.python-version }}"
+          PY_TAG="${PY_TAG//./}"
+          gh release download --latest --repo Klyne-org/Enigma-DSL \
+            --pattern "enigma_dsl-*-${PY_TAG}-${PY_TAG}-macosx_14_0_arm64.whl" \
+            --dir /tmp/wheels
+          pip install /tmp/wheels/*.whl pytest
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Test portable suite
         run: pytest tests/portable -v
