@@ -175,6 +175,75 @@ public func enigma_dispatch(
     return 0
 }
 
+// ── Batched dispatch ─────────────────────────────────────────────────────
+// Encodes N compute kernels into ONE command buffer and synchronizes once.
+// The per-commit + waitUntilCompleted cost (~290us on M-series) is paid a
+// single time for the whole batch instead of once per kernel.
+//
+// Layout of the flat parameter arrays (all length `kernelCount`):
+//   psoPtrs[k]        pipeline state for kernel k
+//   bufCounts[k]      number of buffers bound to kernel k
+//   grid{X,Y,Z}[k]    grid size for kernel k
+//   tg{X,Y,Z}[k]      threadgroup size for kernel k
+// `bufPtrsFlat` is the concatenation of every kernel's buffer list, in order;
+// kernel k consumes bufCounts[k] entries starting at the running offset.
+
+@_cdecl("enigma_dispatch_batch")
+public func enigma_dispatch_batch(
+    _ queuePtr: UnsafeMutableRawPointer,
+    _ psoPtrs: UnsafePointer<UnsafeMutableRawPointer?>,
+    _ kernelCount: Int,
+    _ bufPtrsFlat: UnsafePointer<UnsafeMutableRawPointer?>,
+    _ bufCounts: UnsafePointer<Int>,
+    _ gridX: UnsafePointer<Int>, _ gridY: UnsafePointer<Int>, _ gridZ: UnsafePointer<Int>,
+    _ tgX: UnsafePointer<Int>, _ tgY: UnsafePointer<Int>, _ tgZ: UnsafePointer<Int>
+) -> Int32 {
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+
+    guard let cmdBuf = queue.makeCommandBuffer() else {
+        fputs("enigma: failed to create command buffer (batch)\n", stderr)
+        return -1
+    }
+    guard let encoder = cmdBuf.makeComputeCommandEncoder() else {
+        fputs("enigma: failed to create compute encoder (batch)\n", stderr)
+        return -1
+    }
+
+    var bufOffset = 0
+    for k in 0..<kernelCount {
+        guard let psoRaw = psoPtrs[k] else {
+            fputs("enigma: null pipeline state at kernel \(k)\n", stderr)
+            encoder.endEncoding()
+            return -1
+        }
+        let pso = Unmanaged<MTLComputePipelineState>.fromOpaque(psoRaw).takeUnretainedValue()
+        encoder.setComputePipelineState(pso)
+
+        let count = bufCounts[k]
+        for i in 0..<count {
+            if let rawPtr = bufPtrsFlat[bufOffset + i] {
+                let buffer = Unmanaged<MTLBuffer>.fromOpaque(rawPtr).takeUnretainedValue()
+                encoder.setBuffer(buffer, offset: 0, index: i)
+            }
+        }
+        bufOffset += count
+
+        encoder.dispatchThreads(
+            MTLSize(width: gridX[k], height: gridY[k], depth: gridZ[k]),
+            threadsPerThreadgroup: MTLSize(width: tgX[k], height: tgY[k], depth: tgZ[k]))
+    }
+
+    encoder.endEncoding()
+    cmdBuf.commit()
+    cmdBuf.waitUntilCompleted()
+
+    if let error = cmdBuf.error {
+        fputs("enigma: GPU execution error (batch): \(error)\n", stderr)
+        return -2
+    }
+    return 0
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────────────
 
 @_cdecl("enigma_dispatch_timed")
