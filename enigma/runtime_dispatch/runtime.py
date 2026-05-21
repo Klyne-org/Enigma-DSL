@@ -255,6 +255,28 @@ class MetalRuntime:
         self._queue = self._lib.enigma_create_queue(self._device)
         if not self._queue:
             raise _gpu_error("failed to create Metal command queue")
+        # Cache of loaded MTLLibrary handles, keyed by metallib path. Parsing a
+        # metallib costs ~40us; the same file is re-loaded on every execute()
+        # call without this. Handles live for the lifetime of the runtime and
+        # are freed in close().
+        self._lib_cache: dict[str, Any] = {}
+
+    def _load_library_cached(self, metallib_path: str):
+        """Load (or fetch a cached) MTLLibrary for ``metallib_path``."""
+        handle = self._lib_cache.get(metallib_path)
+        if handle is not None:
+            return handle
+        handle = self._lib.enigma_load_library(self._device, metallib_path.encode())
+        if not handle:
+            raise _gpu_error("failed to load metallib", path=metallib_path)
+        self._lib_cache[metallib_path] = handle
+        return handle
+
+    def close(self) -> None:
+        """Release cached GPU library handles. Safe to call more than once."""
+        for handle in self._lib_cache.values():
+            self._lib.enigma_release(handle)
+        self._lib_cache.clear()
 
     def _setup_signatures(self):
         L = self._lib
@@ -294,6 +316,18 @@ class MetalRuntime:
         ]
         L.enigma_release.restype = None
         L.enigma_release.argtypes = [vp]
+
+        # Batched dispatch: N kernels encoded into one command buffer.
+        L.enigma_dispatch_batch.restype = i32
+        L.enigma_dispatch_batch.argtypes = [
+            vp,                          # queue
+            ctypes.POINTER(vp),          # pso pointers
+            sz,                          # kernel count
+            ctypes.POINTER(vp),          # flat buffer pointers
+            ctypes.POINTER(sz),          # per-kernel buffer counts
+            ctypes.POINTER(sz), ctypes.POINTER(sz), ctypes.POINTER(sz),  # grid x/y/z
+            ctypes.POINTER(sz), ctypes.POINTER(sz), ctypes.POINTER(sz),  # tg x/y/z
+        ]
 
         # Capability queries (added for R10 / R6 M3+ gating).
         L.enigma_device_supports_family.restype = i32
@@ -349,11 +383,8 @@ class MetalRuntime:
                             and the kernel writes directly into the mlx buffer.
             output_dtypes:  list of mlx dtypes matching ``output_shapes``.
         """
-        mtl_lib = self._lib.enigma_load_library(self._device, compiled.metallib_path.encode())
-        if not mtl_lib:
-            raise _gpu_error(
-                "failed to load metallib", path=compiled.metallib_path, kernel=compiled.kernel_name
-            )
+        # Cached: the same metallib is otherwise re-parsed on every call.
+        mtl_lib = self._load_library_cached(compiled.metallib_path)
 
         if constants:
             inds, tags, vals, n = _pack_constants(constants)
@@ -363,7 +394,6 @@ class MetalRuntime:
         else:
             pso = self._lib.enigma_create_pipeline(self._device, mtl_lib, compiled.kernel_name.encode())
         if not pso:
-            self._lib.enigma_release(mtl_lib)
             raise _gpu_error(
                 "failed to create compute pipeline",
                 kernel=compiled.kernel_name,
@@ -517,7 +547,7 @@ class MetalRuntime:
             for buf in gpu_bufs:
                 self._lib.enigma_release(buf)
             self._lib.enigma_release(pso)
-            self._lib.enigma_release(mtl_lib)
+            # mtl_lib is owned by self._lib_cache and freed in close() — not here.
             # mlx_input_keepalive / mlx_output_arrays fall out of scope naturally,
             # but we only release GPU handles here — the underlying mlx buffers
             # are managed by mlx's own allocator.
@@ -554,16 +584,16 @@ class MetalRuntime:
                     f"The output is appended AFTER inputs in the bind list."
                 )
 
-        mtl_lib = self._lib.enigma_load_library(self._device, compiled.metallib_path.encode())
-        if not mtl_lib:
-            raise _gpu_error("failed to load metallib", path=compiled.metallib_path)
+        # Cached & runtime-owned — PreparedKernel.release() must not free it.
+        mtl_lib = self._load_library_cached(compiled.metallib_path)
 
         pso = self._lib.enigma_create_pipeline(self._device, mtl_lib, compiled.kernel_name.encode())
         if not pso:
-            self._lib.enigma_release(mtl_lib)
             raise _gpu_error("failed to create compute pipeline", kernel=compiled.kernel_name)
 
         gpu_bufs = []
+        # Track input byte sizes so set_input() can bounds-check replacements.
+        input_sizes = []
         for i, arr in enumerate(inputs):
             arr = np.ascontiguousarray(arr)
             buf = self._lib.enigma_create_buffer(self._device, arr.ctypes.data, arr.nbytes)
@@ -571,18 +601,17 @@ class MetalRuntime:
                 for b in gpu_bufs:
                     self._lib.enigma_release(b)
                 self._lib.enigma_release(pso)
-                self._lib.enigma_release(mtl_lib)
                 raise _gpu_error(
                     "failed to create input buffer", buffer_index=i, size_bytes=arr.nbytes
                 )
             gpu_bufs.append(buf)
+            input_sizes.append(arr.nbytes)
 
         out_buf = self._lib.enigma_create_buffer_empty(self._device, output_size)
         if not out_buf:
             for b in gpu_bufs:
                 self._lib.enigma_release(b)
             self._lib.enigma_release(pso)
-            self._lib.enigma_release(mtl_lib)
             raise _gpu_error("failed to create output buffer", size_bytes=output_size)
         gpu_bufs.append(out_buf)
 
@@ -596,20 +625,89 @@ class MetalRuntime:
             out_buf,
             output_size,
             compiled.kernel_name,
+            input_sizes,
         )
+
+    def dispatch_batch(self, jobs: List[Tuple["PreparedKernel", tuple, tuple]]) -> None:
+        """Encode several prepared kernels into one command buffer, sync once.
+
+        ``jobs`` is a list of ``(prepared, grid, threads)`` tuples. The whole
+        batch shares a single ``commit`` + ``waitUntilCompleted``, so the fixed
+        submit/synchronize cost (~290us on M-series) is paid once for the batch
+        instead of once per kernel. Kernels run in list order on one queue.
+        """
+        if not jobs:
+            return
+        n = len(jobs)
+        vp, sz = ctypes.c_void_p, ctypes.c_size_t
+
+        psos = (vp * n)()
+        buf_counts = (sz * n)()
+        gx, gy, gz = (sz * n)(), (sz * n)(), (sz * n)()
+        tx, ty, tz = (sz * n)(), (sz * n)(), (sz * n)()
+        flat_bufs: list = []
+        for k, (prepared, grid, threads) in enumerate(jobs):
+            if not isinstance(prepared, PreparedKernel):
+                raise _gpu_error(
+                    "dispatch_batch: each job needs a PreparedKernel", job_index=k
+                )
+            psos[k] = prepared._pso
+            buf_counts[k] = len(prepared._gpu_bufs)
+            gx[k], gy[k], gz[k] = grid[0], grid[1], grid[2]
+            tx[k], ty[k], tz[k] = threads[0], threads[1], threads[2]
+            flat_bufs.extend(prepared._gpu_bufs)
+
+        FlatArr = vp * len(flat_bufs)
+        flat_arr = FlatArr(*flat_bufs)
+
+        rc = self._lib.enigma_dispatch_batch(
+            self._queue, psos, n, flat_arr, buf_counts, gx, gy, gz, tx, ty, tz,
+        )
+        _check_dispatch(rc, f"batch[{n}]")
 
 
 class PreparedKernel:
     """Pre-allocated resources for fast repeated dispatch."""
 
     def __init__(
-        self, runtime, pso, mtl_lib, gpu_bufs, buf_arr, out_buf, output_size, kernel_name=""
+        self, runtime, pso, mtl_lib, gpu_bufs, buf_arr, out_buf, output_size,
+        kernel_name="", input_sizes=None,
     ):
         self._rt = runtime
         self._pso, self._mtl_lib = pso, mtl_lib
         self._gpu_bufs, self._buf_arr = gpu_bufs, buf_arr
         self._out_buf, self._output_size = out_buf, output_size
         self._kernel_name = kernel_name
+        # Byte size of each input buffer (excludes the trailing output buffer),
+        # used to bounds-check set_input().
+        self._input_sizes = list(input_sizes or [])
+
+    def set_input(self, index: int, array: np.ndarray) -> None:
+        """Overwrite input buffer ``index`` in place — no realloc, no PSO churn.
+
+        Copies ``array`` into the shared-memory buffer created at prepare()
+        time, so repeated dispatches can run on changing data while still
+        skipping buffer allocation (~30us each) and library/pipeline setup.
+        ``array`` must not be larger than the original input at that slot.
+        """
+        n_inputs = len(self._gpu_bufs) - 1  # last buffer is the output
+        if not 0 <= index < n_inputs:
+            raise _gpu_error(
+                "set_input: index out of range",
+                index=index,
+                valid_range=f"0..{n_inputs - 1}",
+            )
+        arr = np.ascontiguousarray(array)
+        cap = self._input_sizes[index]
+        if arr.nbytes > cap:
+            raise _gpu_error(
+                "set_input: array larger than the prepared buffer",
+                index=index,
+                array_bytes=arr.nbytes,
+                buffer_bytes=cap,
+            )
+        dst = self._rt._lib.enigma_buffer_contents(self._gpu_bufs[index])
+        ctypes.memmove(dst, arr.ctypes.data, arr.nbytes)
 
     def dispatch(self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]) -> None:
         rc = self._rt._lib.enigma_dispatch(
@@ -653,4 +751,5 @@ class PreparedKernel:
         for buf in self._gpu_bufs:
             self._rt._lib.enigma_release(buf)
         self._rt._lib.enigma_release(self._pso)
-        self._rt._lib.enigma_release(self._mtl_lib)
+        # _mtl_lib is owned by the runtime's library cache (freed in
+        # MetalRuntime.close()); releasing it here would corrupt the cache.
