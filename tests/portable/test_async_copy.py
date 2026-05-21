@@ -60,8 +60,10 @@ class TestAsyncCopyTracing(unittest.TestCase):
 
         op_types = [op.op_type for op in trace_kernel(k).ops]
         for needle in (
-            "async_copy_1d_d2t", "async_copy_1d_t2d",
-            "async_copy_2d_d2t", "async_copy_2d_t2d",
+            "async_copy_1d_d2t",
+            "async_copy_1d_t2d",
+            "async_copy_2d_d2t",
+            "async_copy_2d_t2d",
             "async_copy_wait",
         ):
             self.assertIn(needle, op_types, f"missing tracer op {needle}")
@@ -102,14 +104,12 @@ class TestAsyncCopyMSL(unittest.TestCase):
             "air.simdgroup_async_copy_2d.p1i8.p3i8",
             "air.wait_simdgroup_events",
         ):
-            self.assertIn(intrinsic, msl,
-                          f"missing AIR intrinsic in MSL: {intrinsic}")
+            self.assertIn(intrinsic, msl, f"missing AIR intrinsic in MSL: {intrinsic}")
 
         # The preamble must come before the kernel definition.
         kernel_pos = msl.find("kernel void")
         preamble_pos = msl.find("struct _enigma_async_event_t")
-        self.assertGreater(kernel_pos, preamble_pos,
-                           "async-copy preamble must precede kernel")
+        self.assertGreater(kernel_pos, preamble_pos, "async-copy preamble must precede kernel")
 
     def test_msl_does_not_emit_preamble_when_unused(self):
         @enigma.kernel
