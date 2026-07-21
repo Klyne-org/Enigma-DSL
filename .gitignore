@@ -35,6 +35,7 @@ wheelhouse/
 .venv/
 venv/
 .venv-*/
+.venv*/
 
 # --- IDE / OS files ---
 .DS_Store

@@ -213,6 +213,152 @@ public func enigma_dispatch_timed(
     return cmdBuf.error != nil ? -2 : 0
 }
 
+// ── Profiled dispatch (stage-boundary counter sampling) ─────────────────
+
+private func enigmaTimestampCounterSet(_ device: MTLDevice) -> MTLCounterSet? {
+    return device.counterSets?.first {
+        $0.name.caseInsensitiveCompare(MTLCommonCounterSet.timestamp.rawValue) == .orderedSame
+    }
+}
+
+@_cdecl("enigma_supports_stage_counters")
+public func enigma_supports_stage_counters(_ devicePtr: UnsafeMutableRawPointer) -> Int32 {
+    let device = Unmanaged<MTLDevice>.fromOpaque(devicePtr).takeUnretainedValue()
+    guard device.supportsCounterSampling(.atStageBoundary) else { return 0 }
+    return enigmaTimestampCounterSet(device) != nil ? 1 : 0
+}
+
+// outTimings layout (all microseconds except [4]):
+//   [0] command-buffer GPU time     (gpuEndTime - gpuStartTime)
+//   [1] CPU scheduling time         (kernelEndTime - kernelStartTime)
+//   [2] queue wait                  (gpuStartTime - kernelEndTime, clamped >= 0)
+//   [3] encoder GPU time            (stage-boundary counter samples; 0 if unavailable)
+//   [4] 1.0 if counter samples resolved, else 0.0
+@_cdecl("enigma_dispatch_profiled")
+public func enigma_dispatch_profiled(
+    _ devicePtr: UnsafeMutableRawPointer,
+    _ psoPtr: UnsafeMutableRawPointer,
+    _ queuePtr: UnsafeMutableRawPointer,
+    _ bufPtrs: UnsafePointer<UnsafeMutableRawPointer?>,
+    _ bufCount: Int,
+    _ gridX: Int, _ gridY: Int, _ gridZ: Int,
+    _ threadsX: Int, _ threadsY: Int, _ threadsZ: Int,
+    _ outTimings: UnsafeMutablePointer<Double>
+) -> Int32 {
+    let device = Unmanaged<MTLDevice>.fromOpaque(devicePtr).takeUnretainedValue()
+    let pso = Unmanaged<MTLComputePipelineState>.fromOpaque(psoPtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    for i in 0..<5 { outTimings[i] = 0 }
+
+    var sampleBuffer: MTLCounterSampleBuffer? = nil
+    if device.supportsCounterSampling(.atStageBoundary),
+       let counterSet = enigmaTimestampCounterSet(device) {
+        let desc = MTLCounterSampleBufferDescriptor()
+        desc.counterSet = counterSet
+        desc.storageMode = .shared
+        desc.sampleCount = 2
+        sampleBuffer = try? device.makeCounterSampleBuffer(descriptor: desc)
+    }
+
+    guard let cmdBuf = queue.makeCommandBuffer() else { return -1 }
+
+    let encoder: MTLComputeCommandEncoder?
+    if let sb = sampleBuffer {
+        let passDesc = MTLComputePassDescriptor()
+        let attachment = passDesc.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sb
+        attachment.startOfEncoderSampleIndex = 0
+        attachment.endOfEncoderSampleIndex = 1
+        encoder = cmdBuf.makeComputeCommandEncoder(descriptor: passDesc)
+    } else {
+        encoder = cmdBuf.makeComputeCommandEncoder()
+    }
+    guard let enc = encoder else { return -1 }
+
+    enc.setComputePipelineState(pso)
+    for i in 0..<bufCount {
+        if let rawPtr = bufPtrs[i] {
+            let buffer = Unmanaged<MTLBuffer>.fromOpaque(rawPtr).takeUnretainedValue()
+            enc.setBuffer(buffer, offset: 0, index: i)
+        }
+    }
+    enc.dispatchThreads(
+        MTLSize(width: gridX, height: gridY, depth: gridZ),
+        threadsPerThreadgroup: MTLSize(width: threadsX, height: threadsY, depth: threadsZ))
+    enc.endEncoding()
+
+    // GPU-tick -> wall-time correlation, sampled around the measured region.
+    let before = device.sampleTimestamps()
+    cmdBuf.commit()
+    cmdBuf.waitUntilCompleted()
+    let after = device.sampleTimestamps()
+
+    outTimings[0] = (cmdBuf.gpuEndTime - cmdBuf.gpuStartTime) * 1_000_000
+    outTimings[1] = (cmdBuf.kernelEndTime - cmdBuf.kernelStartTime) * 1_000_000
+    outTimings[2] = max(0, (cmdBuf.gpuStartTime - cmdBuf.kernelEndTime) * 1_000_000)
+
+    if let sb = sampleBuffer,
+       let data = try? sb.resolveCounterRange(0..<2),
+       data.count >= 2 * MemoryLayout<MTLCounterResultTimestamp>.stride {
+        let samples = data.withUnsafeBytes {
+            Array($0.bindMemory(to: MTLCounterResultTimestamp.self).prefix(2))
+        }
+        let startTs = samples[0].timestamp
+        let endTs = samples[1].timestamp
+        if startTs != MTLCounterErrorValue, endTs != MTLCounterErrorValue,
+           endTs > startTs, after.gpu > before.gpu {
+            let nsPerTick = Double(after.cpu - before.cpu) / Double(after.gpu - before.gpu)
+            outTimings[3] = Double(endTs - startTs) * nsPerTick / 1_000.0
+            outTimings[4] = 1.0
+        }
+    }
+
+    return cmdBuf.error != nil ? -2 : 0
+}
+
+// ── Pipeline insight ─────────────────────────────────────────────────────
+
+// outVals: [0] maxTotalThreadsPerThreadgroup
+//          [1] threadExecutionWidth
+//          [2] staticThreadgroupMemoryLength (bytes)
+@_cdecl("enigma_pipeline_stats")
+public func enigma_pipeline_stats(
+    _ psoPtr: UnsafeMutableRawPointer,
+    _ outVals: UnsafeMutablePointer<Int>
+) {
+    let pso = Unmanaged<MTLComputePipelineState>.fromOpaque(psoPtr).takeUnretainedValue()
+    outVals[0] = pso.maxTotalThreadsPerThreadgroup
+    outVals[1] = pso.threadExecutionWidth
+    outVals[2] = pso.staticThreadgroupMemoryLength
+}
+
+// ── Programmatic Metal capture (.gputrace) ──────────────────────────────
+
+// Returns 0 on success, -1 if .gputrace capture is unsupported (set
+// MTL_CAPTURE_ENABLED=1), -2 if startCapture threw, -3 if no device.
+@_cdecl("enigma_capture_start")
+public func enigma_capture_start(_ path: UnsafePointer<CChar>) -> Int32 {
+    let manager = MTLCaptureManager.shared()
+    guard manager.supportsDestination(.gpuTraceDocument) else { return -1 }
+    guard let device = MTLCreateSystemDefaultDevice() else { return -3 }
+    let desc = MTLCaptureDescriptor()
+    desc.captureObject = device
+    desc.destination = .gpuTraceDocument
+    desc.outputURL = URL(fileURLWithPath: String(cString: path))
+    do {
+        try manager.startCapture(with: desc)
+        return 0
+    } catch {
+        fputs("enigma: capture start failed: \(error)\n", stderr)
+        return -2
+    }
+}
+
+@_cdecl("enigma_capture_stop")
+public func enigma_capture_stop() {
+    MTLCaptureManager.shared().stopCapture()
+}
+
 @_cdecl("enigma_release")
 public func enigma_release(_ ptr: UnsafeMutableRawPointer) {
     Unmanaged<AnyObject>.fromOpaque(ptr).release()

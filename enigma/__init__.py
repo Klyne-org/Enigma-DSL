@@ -9,6 +9,19 @@ except ImportError:
     __version__ = "unknown"
 from .compiler.compiler import CompiledKernel as CompiledKernel, compile as compile
 from .compiler.kernel import jit as jit, kernel as kernel
+from .profiler import (
+    KernelBenchmark as KernelBenchmark,
+    Profiler as Profiler,
+    ProfilerEvent as ProfilerEvent,
+    ProfilerResult as ProfilerResult,
+    benchmark_kernel as benchmark_kernel,
+    profile as profile,
+    profile_kernel as profile_kernel,
+    record_function as record_function,
+    register_kernel_hook as register_kernel_hook,
+    scope as scope,
+    unregister_kernel_hook as unregister_kernel_hook,
+)
 from .core import (
     Layout as Layout,
     Swizzle as Swizzle,

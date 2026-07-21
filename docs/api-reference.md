@@ -276,6 +276,108 @@ gpu_us = pk.dispatch_timed(grid=(N, 1, 1), threads=(256, 1, 1))
 pk.release()
 ```
 
+### Profiling Runtime Dispatch
+
+`enigma.profile()` records Python scopes and Enigma runtime dispatch events
+without changing generated MSL. When profiling is disabled, the runtime uses
+the normal dispatch path.
+
+```python
+with enigma.profile(profile_memory=True) as prof:
+    with enigma.record_function("vector_add"):
+        out_bytes = rt.execute(
+            compiled,
+            [A, B],
+            N * 4,
+            grid=(N, 1, 1),
+            threads=(256, 1, 1),
+        )
+
+print(prof.key_averages().table(sort_by="gpu_total_us"))
+prof.export_chrome_trace("enigma_trace.json")
+```
+
+Recorded runtime events include:
+
+| Event | Category | Meaning |
+|---|---|---|
+| `load_library` | runtime | Load the compiled `.metallib` |
+| `create_pipeline` | runtime | Create the Metal compute pipeline |
+| `create_input_buffers` | memory | Materialize input/scalar buffers |
+| `create_output_buffers` | memory | Allocate output buffers |
+| `gpu_dispatch` | metal | Metal command-buffer GPU time |
+| `read_output` | memory | Copy output bytes back to Python/MLX |
+| `release_resources` | runtime | Release temporary Metal resources |
+| `execute_total` | runtime | Full one-shot `execute` wall time |
+| `prepared_dispatch` | runtime | Blocking prepared dispatch wall time |
+
+For repeated benchmarking, prefer `runtime.prepare(...)` and dispatch the
+prepared kernel under the profiler. One-shot `execute(...)` includes library
+load, pipeline creation, buffer creation, dispatch, readback, and cleanup.
+
+`enigma.profile_kernel(...)` is a convenience helper for prepared kernels:
+
+```python
+prepared = rt.prepare(compiled, [A, B], N * 4)
+result = enigma.profile_kernel(
+    prepared,
+    grid=(N, 1, 1),
+    threads=(256, 1, 1),
+    repeat=100,
+    warmup=20,
+)
+print(result.table(sort_by="gpu_total_us"))
+prepared.release()
+```
+
+#### Scopes, metrics, hooks, and call-path analysis
+
+Proton-style APIs (see `docs/profiler.md` for the full guide):
+
+```python
+with enigma.profile() as prof:
+    with enigma.scope("gemm", metrics={"flops": 2 * M * N * K, "bytes": nbytes}):
+        prepared.dispatch(grid, threads)
+
+print(prof.key_averages().table())                       # + GFLOP/s, GB/s columns
+print(prof.key_averages(group_by="call_path").table())   # per-context rows
+print(prof.tree())                                       # call-path tree
+prof.export_hatchet("profile.json")                      # Hatchet literal JSON
+```
+
+- `enigma.scope(name, metrics=...)` nests; runtime events recorded inside a
+  scope inherit its call path. `enigma.record_function` is an alias.
+- `enigma.register_kernel_hook(kernel_name, fn)` attaches
+  `fn(kernel_name=, grid=, threads=) -> {"flops": ..., "bytes": ...}` to
+  every profiled dispatch of that kernel.
+
+#### Unbiased benchmarking
+
+`enigma.benchmark_kernel(...)` measures steady-state kernel time with Metal
+GPU timestamps only (no profiler events in the measured region) and reports
+the distribution:
+
+```python
+bench = enigma.benchmark_kernel(
+    prepared, grid=(N, 1, 1), threads=(256, 1, 1),
+    repeat=100, warmup=10, bytes_moved=12.0 * N,
+)
+print(bench.summary())  # min / p50 / mean / p90 / max + GB/s (p50)
+```
+
+Compare kernels by `median_us`; use `profile_kernel` to inspect stages.
+
+#### Caveats
+
+- V1 profiling does not instrument generated kernels. GPU codegen and MSL
+  source stay unchanged.
+- `gpu_dispatch` uses Metal command-buffer timestamps. Exact values are
+  hardware/OS dependent and should be used statistically, not as exact tests.
+- Apple Silicon unified memory does not make memory cost disappear. Buffer
+  materialization, CPU/GPU contention, cache effects, memory pressure, and
+  readback can still dominate small kernels.
+- Xcode `.gputrace` capture and Metal counter sampling are not part of V1.
+
 ---
 
 ## 6. Thread & Grid Queries
@@ -1539,7 +1641,8 @@ class TestKernel(unittest.TestCase):
 ### `enigma.benchmark` — micro-benchmarks for kernels
 
 A lightweight timing harness. CPU-side benchmarks use `time.perf_counter`;
-GPU-side benchmarks measure end-to-end dispatch wall-clock.
+GPU-side benchmarks use Metal command-buffer timestamps through
+`PreparedKernel.dispatch_timed`.
 
 #### `enigma.benchmark.bench(fn, *args, repeat=50, warmup=5, label=None, **kwargs) -> BenchResult`
 

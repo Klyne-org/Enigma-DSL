@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -15,6 +16,7 @@ from typing import Any, List, Optional, Tuple
 import numpy as np
 
 from ..compiler.compiler import CompiledKernel
+from ..profiler import ProfilerEvent, get_active_profiler, set_capture_backend
 from . import mlx_interop as _mlx_interop
 
 _SWIFT_DIR = Path(__file__).parent / "swift"
@@ -46,6 +48,17 @@ def _check_dispatch(rc: int, kernel_name: str = "", grid=None, threads=None):
         threads=threads,
         return_code=rc,
     )
+
+
+def _profiled_timings_metadata(timings) -> dict:
+    """Unpack enigma_dispatch_profiled output into event metadata."""
+    meta = {
+        "scheduling_us": float(timings[1]),
+        "queue_wait_us": float(timings[2]),
+    }
+    if timings[4]:
+        meta["encoder_gpu_us"] = float(timings[3])
+    return meta
 
 
 def _ensure_runtime_built() -> Path:
@@ -255,6 +268,10 @@ class MetalRuntime:
         self._queue = self._lib.enigma_create_queue(self._device)
         if not self._queue:
             raise _gpu_error("failed to create Metal command queue")
+        set_capture_backend(
+            lambda p: int(self._lib.enigma_capture_start(p.encode())),
+            self._lib.enigma_capture_stop,
+        )
 
     def _setup_signatures(self):
         L = self._lib
@@ -292,8 +309,32 @@ class MetalRuntime:
             sz,
             ctypes.POINTER(ctypes.c_double),
         ]
+        L.enigma_supports_stage_counters.restype = i32
+        L.enigma_supports_stage_counters.argtypes = [vp]
+        L.enigma_dispatch_profiled.restype = i32
+        L.enigma_dispatch_profiled.argtypes = [
+            vp,  # device
+            vp,  # pso
+            vp,  # queue
+            ctypes.POINTER(vp),
+            sz,
+            sz,
+            sz,
+            sz,
+            sz,
+            sz,
+            sz,
+            ctypes.POINTER(ctypes.c_double),  # out: 5 doubles (see Swift docs)
+        ]
         L.enigma_release.restype = None
         L.enigma_release.argtypes = [vp]
+
+        L.enigma_pipeline_stats.restype = None
+        L.enigma_pipeline_stats.argtypes = [vp, ctypes.POINTER(sz)]
+        L.enigma_capture_start.restype = i32
+        L.enigma_capture_start.argtypes = [cp]
+        L.enigma_capture_stop.restype = None
+        L.enigma_capture_stop.argtypes = []
 
         # Capability queries (added for R10 / R6 M3+ gating).
         L.enigma_device_supports_family.restype = i32
@@ -349,12 +390,49 @@ class MetalRuntime:
                             and the kernel writes directly into the mlx buffer.
             output_dtypes:  list of mlx dtypes matching ``output_shapes``.
         """
+        profiler = get_active_profiler()
+        execute_start_ns = time.perf_counter_ns() if profiler is not None else 0
+        input_bytes = 0
+        output_bytes = 0
+
+        def add_event(
+            name: str,
+            category: str,
+            start_ns: int,
+            end_ns: int,
+            *,
+            gpu_time_us: float = 0.0,
+            buffer_count: int = 0,
+            metadata: Optional[dict] = None,
+        ) -> None:
+            if profiler is None:
+                return
+            profiler.add_event(
+                ProfilerEvent(
+                    name=name,
+                    category=category,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    kernel_name=compiled.kernel_name,
+                    grid=grid,
+                    threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=output_bytes,
+                    buffer_count=buffer_count,
+                    gpu_time_us=gpu_time_us,
+                    metadata=metadata or {},
+                )
+            )
+
+        stage_start_ns = time.perf_counter_ns()
         mtl_lib = self._lib.enigma_load_library(self._device, compiled.metallib_path.encode())
+        add_event("load_library", "runtime", stage_start_ns, time.perf_counter_ns())
         if not mtl_lib:
             raise _gpu_error(
                 "failed to load metallib", path=compiled.metallib_path, kernel=compiled.kernel_name
             )
 
+        stage_start_ns = time.perf_counter_ns()
         if constants:
             inds, tags, vals, n = _pack_constants(constants)
             pso = self._lib.enigma_create_pipeline_with_constants(
@@ -362,6 +440,13 @@ class MetalRuntime:
             )
         else:
             pso = self._lib.enigma_create_pipeline(self._device, mtl_lib, compiled.kernel_name.encode())
+        add_event(
+            "create_pipeline",
+            "runtime",
+            stage_start_ns,
+            time.perf_counter_ns(),
+            metadata={"function_constants": bool(constants)},
+        )
         if not pso:
             self._lib.enigma_release(mtl_lib)
             raise _gpu_error(
@@ -390,6 +475,7 @@ class MetalRuntime:
                 raise _gpu_error("execute: must pass output_size, output_sizes, or output_shapes")
             out_sizes = [int(output_size)]
             multi_out = False
+        output_bytes = sum(out_sizes)
         scalar_params = getattr(compiled, "scalar_params", None) or []
 
         # Validate that the bind list (inputs + scalars + outputs) covers
@@ -424,6 +510,7 @@ class MetalRuntime:
         mlx_output_arrays: list = []  # kept alive for the duration of dispatch
         mlx_input_keepalive: list = []  # inputs passed as mlx.array
         try:
+            stage_start_ns = time.perf_counter_ns()
             merged_inputs = _merge_scalar_buffers(
                 inputs, scalars or [], scalar_params, num_outputs=len(out_sizes)
             )
@@ -431,6 +518,7 @@ class MetalRuntime:
                 if _mlx_interop.is_mlx_array(arr):
                     mlx_input_keepalive.append(arr)
                     ptr, nbytes = _mlx_interop.mlx_buffer_ptr_and_size(arr)
+                    input_bytes += int(nbytes)
                     buf = self._lib.enigma_create_buffer(self._device, ptr, nbytes)
                     if not buf:
                         raise _gpu_error(
@@ -442,6 +530,7 @@ class MetalRuntime:
                         )
                 else:
                     arr = np.ascontiguousarray(arr)
+                    input_bytes += int(arr.nbytes)
                     buf = self._lib.enigma_create_buffer(self._device, arr.ctypes.data, arr.nbytes)
                     if not buf:
                         raise _gpu_error(
@@ -452,8 +541,16 @@ class MetalRuntime:
                             shape=arr.shape,
                         )
                 gpu_bufs.append(buf)
+            add_event(
+                "create_input_buffers",
+                "memory",
+                stage_start_ns,
+                time.perf_counter_ns(),
+                buffer_count=len(merged_inputs),
+            )
 
             out_bufs = []
+            stage_start_ns = time.perf_counter_ns()
             if mlx_output_mode:
                 # Allocate mlx output arrays now so we can materialize their
                 # unified-memory buffers; the Metal dispatch writes to a shared
@@ -477,24 +574,66 @@ class MetalRuntime:
                         raise _gpu_error("failed to create output buffer", size_bytes=sz)
                     out_bufs.append(ob)
                     gpu_bufs.append(ob)
+            add_event(
+                "create_output_buffers",
+                "memory",
+                stage_start_ns,
+                time.perf_counter_ns(),
+                buffer_count=len(out_bufs),
+            )
 
             BufArr = ctypes.c_void_p * len(gpu_bufs)
             buf_arr = BufArr(*gpu_bufs)
 
-            rc = self._lib.enigma_dispatch(
-                pso,
-                self._queue,
-                buf_arr,
-                len(gpu_bufs),
-                grid[0],
-                grid[1],
-                grid[2],
-                threads[0],
-                threads[1],
-                threads[2],
-            )
+            stage_start_ns = time.perf_counter_ns()
+            gpu_time_us = 0.0
+            dispatch_meta: dict = {}
+            if profiler is not None:
+                timings = (ctypes.c_double * 5)()
+                rc = self._lib.enigma_dispatch_profiled(
+                    self._device,
+                    pso,
+                    self._queue,
+                    buf_arr,
+                    len(gpu_bufs),
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    threads[0],
+                    threads[1],
+                    threads[2],
+                    timings,
+                )
+                gpu_time_us = timings[0]
+                dispatch_meta = _profiled_timings_metadata(timings)
+                dispatch_meta.update(self._pipeline_stats_metadata(pso, threads))
+            else:
+                rc = self._lib.enigma_dispatch(
+                    pso,
+                    self._queue,
+                    buf_arr,
+                    len(gpu_bufs),
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    threads[0],
+                    threads[1],
+                    threads[2],
+                )
             _check_dispatch(rc, compiled.kernel_name, grid, threads)
+            dispatch_end_ns = time.perf_counter_ns()
+            if profiler is not None:
+                add_event(
+                    "gpu_dispatch",
+                    "metal",
+                    stage_start_ns,
+                    dispatch_end_ns,
+                    gpu_time_us=gpu_time_us,
+                    buffer_count=len(gpu_bufs),
+                    metadata=dispatch_meta,
+                )
 
+            stage_start_ns = time.perf_counter_ns()
             if mlx_output_mode:
                 for ob, sz, mx_out in zip(out_bufs, out_sizes, mlx_output_arrays):
                     out_ptr = self._lib.enigma_buffer_contents(ob)
@@ -506,21 +645,60 @@ class MetalRuntime:
                             kernel_bytes=sz,
                         )
                     ctypes.memmove(dst_ptr, out_ptr, sz)
+                add_event("read_output", "memory", stage_start_ns, time.perf_counter_ns())
                 return mlx_output_arrays if multi_out else mlx_output_arrays[0]
 
             outs: list[bytes] = []
             for ob, sz in zip(out_bufs, out_sizes):
                 out_ptr = self._lib.enigma_buffer_contents(ob)
                 outs.append(bytes((ctypes.c_char * sz).from_address(out_ptr)))
+            add_event("read_output", "memory", stage_start_ns, time.perf_counter_ns())
             return outs if multi_out else outs[0]
         finally:
+            release_start_ns = time.perf_counter_ns()
             for buf in gpu_bufs:
                 self._lib.enigma_release(buf)
             self._lib.enigma_release(pso)
             self._lib.enigma_release(mtl_lib)
+            release_end_ns = time.perf_counter_ns()
+            add_event(
+                "release_resources",
+                "runtime",
+                release_start_ns,
+                release_end_ns,
+                buffer_count=len(gpu_bufs),
+            )
+            add_event(
+                "execute_total",
+                "runtime",
+                execute_start_ns,
+                release_end_ns,
+                buffer_count=len(gpu_bufs),
+            )
             # mlx_input_keepalive / mlx_output_arrays fall out of scope naturally,
             # but we only release GPU handles here — the underlying mlx buffers
             # are managed by mlx's own allocator.
+
+    def supports_stage_counters(self) -> bool:
+        """True if the device supports stage-boundary GPU timestamp sampling."""
+        return bool(self._lib.enigma_supports_stage_counters(self._device))
+
+    def _pipeline_stats_metadata(
+        self, pso, threads: Tuple[int, int, int]
+    ) -> dict:
+        """Pipeline insight: occupancy limits from the compiled PSO."""
+        vals = (ctypes.c_size_t * 3)()
+        self._lib.enigma_pipeline_stats(pso, vals)
+        max_threads = int(vals[0])
+        meta = {
+            "max_threads_per_threadgroup": max_threads,
+            "thread_execution_width": int(vals[1]),
+            "static_threadgroup_memory_bytes": int(vals[2]),
+        }
+        if max_threads:
+            tg_size = threads[0] * threads[1] * threads[2]
+            meta["threadgroup_occupancy"] = tg_size / max_threads
+        return meta
 
     def device_capabilities(self) -> "DeviceCapabilities":
         """Return capability flags for the current Metal device."""
@@ -612,6 +790,49 @@ class PreparedKernel:
         self._kernel_name = kernel_name
 
     def dispatch(self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]) -> None:
+        profiler = get_active_profiler()
+        if profiler is not None:
+            start_ns = time.perf_counter_ns()
+            timings, gpu_start_ns, gpu_end_ns = self._dispatch_profiled_raw(grid, threads)
+            end_ns = time.perf_counter_ns()
+            gpu_time = timings[0]
+            input_bytes = sum(self._rt._lib.enigma_buffer_length(b) for b in self._gpu_bufs[:-1])
+            profiler.add_event(
+                ProfilerEvent(
+                    name="gpu_dispatch",
+                    category="metal",
+                    start_ns=gpu_start_ns,
+                    end_ns=gpu_end_ns,
+                    kernel_name=self._kernel_name,
+                    grid=grid,
+                    threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=self._output_size,
+                    buffer_count=len(self._gpu_bufs),
+                    gpu_time_us=gpu_time,
+                    metadata={
+                        **_profiled_timings_metadata(timings),
+                        **self._rt._pipeline_stats_metadata(self._pso, threads),
+                    },
+                )
+            )
+            profiler.add_event(
+                ProfilerEvent(
+                    name="prepared_dispatch",
+                    category="runtime",
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    kernel_name=self._kernel_name,
+                    grid=grid,
+                    threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=self._output_size,
+                    buffer_count=len(self._gpu_bufs),
+                    gpu_time_us=gpu_time,
+                )
+            )
+            return
+
         rc = self._rt._lib.enigma_dispatch(
             self._pso,
             self._rt._queue,
@@ -626,9 +847,34 @@ class PreparedKernel:
         )
         _check_dispatch(rc, self._kernel_name, grid, threads)
 
-    def dispatch_timed(self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]) -> float:
-        """Dispatch and return GPU execution time in microseconds (Metal timestamps)."""
+    def _dispatch_profiled_raw(
+        self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]
+    ) -> tuple["ctypes.Array", int, int]:
+        timings = (ctypes.c_double * 5)()
+        start_ns = time.perf_counter_ns()
+        rc = self._rt._lib.enigma_dispatch_profiled(
+            self._rt._device,
+            self._pso,
+            self._rt._queue,
+            self._buf_arr,
+            len(self._gpu_bufs),
+            grid[0],
+            grid[1],
+            grid[2],
+            threads[0],
+            threads[1],
+            threads[2],
+            timings,
+        )
+        end_ns = time.perf_counter_ns()
+        _check_dispatch(rc, self._kernel_name, grid, threads)
+        return timings, start_ns, end_ns
+
+    def _dispatch_timed_raw(
+        self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]
+    ) -> tuple[float, int, int]:
         gpu_time = ctypes.c_double(0.0)
+        start_ns = time.perf_counter_ns()
         rc = self._rt._lib.enigma_dispatch_timed(
             self._pso,
             self._rt._queue,
@@ -642,8 +888,32 @@ class PreparedKernel:
             threads[2],
             ctypes.byref(gpu_time),
         )
+        end_ns = time.perf_counter_ns()
         _check_dispatch(rc, self._kernel_name, grid, threads)
-        return gpu_time.value
+        return gpu_time.value, start_ns, end_ns
+
+    def dispatch_timed(self, grid: Tuple[int, int, int], threads: Tuple[int, int, int]) -> float:
+        """Dispatch and return GPU execution time in microseconds (Metal timestamps)."""
+        gpu_time, start_ns, end_ns = self._dispatch_timed_raw(grid, threads)
+        profiler = get_active_profiler()
+        if profiler is not None:
+            input_bytes = sum(self._rt._lib.enigma_buffer_length(b) for b in self._gpu_bufs[:-1])
+            profiler.add_event(
+                ProfilerEvent(
+                    name="gpu_dispatch",
+                    category="metal",
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    kernel_name=self._kernel_name,
+                    grid=grid,
+                    threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=self._output_size,
+                    buffer_count=len(self._gpu_bufs),
+                    gpu_time_us=gpu_time,
+                )
+            )
+        return gpu_time
 
     def read_output(self) -> bytes:
         out_ptr = self._rt._lib.enigma_buffer_contents(self._out_buf)
