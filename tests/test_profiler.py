@@ -81,9 +81,13 @@ def test_export_chrome_trace_writes_valid_trace(tmp_path):
 
     payload = json.loads(trace_path.read_text())
     assert "traceEvents" in payload
-    assert payload["traceEvents"][0]["name"] == "scope"
-    assert payload["traceEvents"][0]["ph"] == "X"
-    assert payload["traceEvents"][0]["cat"] == "python"
+    thread_names = [e for e in payload["traceEvents"] if e["ph"] == "M"]
+    assert all(isinstance(e["tid"], int) for e in thread_names)
+
+    scope_event = next(e for e in payload["traceEvents"] if e["ph"] == "X")
+    assert scope_event["name"] == "scope"
+    assert scope_event["cat"] == "python"
+    assert isinstance(scope_event["tid"], int)
 
 
 class _FakeRuntimeLib:
@@ -116,6 +120,9 @@ class _FakeRuntimeLib:
         out_vals[0] = 256  # maxTotalThreadsPerThreadgroup
         out_vals[1] = 32   # threadExecutionWidth
         out_vals[2] = 1024  # staticThreadgroupMemoryLength
+
+    def enigma_buffer_length(self, _buf):
+        return 4
 
 
 class _FakeRuntime:

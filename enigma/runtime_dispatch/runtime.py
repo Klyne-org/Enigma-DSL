@@ -796,6 +796,7 @@ class PreparedKernel:
             timings, gpu_start_ns, gpu_end_ns = self._dispatch_profiled_raw(grid, threads)
             end_ns = time.perf_counter_ns()
             gpu_time = timings[0]
+            input_bytes = sum(self._rt._lib.enigma_buffer_length(b) for b in self._gpu_bufs[:-1])
             profiler.add_event(
                 ProfilerEvent(
                     name="gpu_dispatch",
@@ -805,6 +806,8 @@ class PreparedKernel:
                     kernel_name=self._kernel_name,
                     grid=grid,
                     threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=self._output_size,
                     buffer_count=len(self._gpu_bufs),
                     gpu_time_us=gpu_time,
                     metadata={
@@ -822,6 +825,7 @@ class PreparedKernel:
                     kernel_name=self._kernel_name,
                     grid=grid,
                     threads=threads,
+                    input_bytes=input_bytes,
                     output_bytes=self._output_size,
                     buffer_count=len(self._gpu_bufs),
                     gpu_time_us=gpu_time,
@@ -893,6 +897,7 @@ class PreparedKernel:
         gpu_time, start_ns, end_ns = self._dispatch_timed_raw(grid, threads)
         profiler = get_active_profiler()
         if profiler is not None:
+            input_bytes = sum(self._rt._lib.enigma_buffer_length(b) for b in self._gpu_bufs[:-1])
             profiler.add_event(
                 ProfilerEvent(
                     name="gpu_dispatch",
@@ -902,6 +907,8 @@ class PreparedKernel:
                     kernel_name=self._kernel_name,
                     grid=grid,
                     threads=threads,
+                    input_bytes=input_bytes,
+                    output_bytes=self._output_size,
                     buffer_count=len(self._gpu_bufs),
                     gpu_time_us=gpu_time,
                 )

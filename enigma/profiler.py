@@ -380,6 +380,20 @@ class Profiler:
 
     def export_chrome_trace(self, path: str | Path) -> None:
         trace_events = []
+        categories = ["python", "compile", "runtime", "metal", "memory"]
+        cat_to_tid = {cat: i for i, cat in enumerate(categories, 1)}
+
+        for cat, tid in cat_to_tid.items():
+            trace_events.append(
+                {
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": 1,
+                    "tid": tid,
+                    "args": {"name": cat},
+                }
+            )
+
         for event in self._events:
             args = dict(event.metadata)
             if event.kernel_name is not None:
@@ -406,7 +420,7 @@ class Profiler:
                     "ts": event.start_ns / 1000.0,
                     "dur": event.duration_us,
                     "pid": 1,
-                    "tid": event.category,
+                    "tid": cat_to_tid.get(event.category, 0),
                     "args": args,
                 }
             )
