@@ -1,6 +1,6 @@
 # Enigma Profiler
 
-Proton-style profiling for Enigma Metal kernels: hierarchical scopes, custom
+Profiling for Enigma Metal kernels: hierarchical scopes, custom
 metrics with derived throughput, kernel launch hooks, call-tree and Hatchet
 output, and an unbiased GPU-timestamp benchmark helper. Profiling never
 changes generated MSL, and every API is a no-op when no profiler is active.
@@ -97,7 +97,7 @@ any other keys are carried through to exports untouched.
 ## Kernel Hooks
 
 Register the work formula once; every profiled dispatch of that kernel gets
-metrics automatically (Proton's `launch_metadata` equivalent):
+metrics automatically:
 
 ```python
 enigma.register_kernel_hook(

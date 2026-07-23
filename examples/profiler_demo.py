@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Klyne Research
 
-"""Demo of the Proton-style Enigma profiler on real Metal hardware."""
+"""Demo of the Enigma profiler on real Metal hardware."""
 
 import json
 

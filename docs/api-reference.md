@@ -4,7 +4,7 @@ Enigma is a Python DSL for writing Apple Metal GPU compute kernels. You write
 Python functions decorated with `@enigma.kernel`, and Enigma traces, compiles,
 and dispatches them on the GPU through MLIR and the Metal Shading Language.
 
-**Current release: v0.1.1**  ·  PyPI: <https://pypi.org/project/enigma-dsl/>
+**Current release: v0.2.0** (GitHub release; PyPI still at v0.1.2)  ·  PyPI: <https://pypi.org/project/enigma-dsl/>
 
 ---
 
@@ -332,7 +332,7 @@ prepared.release()
 
 #### Scopes, metrics, hooks, and call-path analysis
 
-Proton-style APIs (see `docs/profiler.md` for the full guide):
+Profiler APIs (see `docs/profiler.md` for the full guide):
 
 ```python
 with enigma.profile() as prof:

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Klyne Research
 
-"""Low-overhead, Proton-style profiling for Enigma runtime dispatch.
+"""Low-overhead profiling for Enigma runtime dispatch.
 
-Design follows the Proton profiler for Triton (Zhou et al., CGO 2026):
-hierarchical scopes form a call-path tree, user scopes can attach custom
+Hierarchical scopes form a call-path tree, user scopes can attach custom
 metrics (``flops``, ``bytes``), kernel hooks derive metrics per dispatch,
 and results aggregate by name or by call path with derived throughput
 (GFLOP/s, GB/s). Output formats: text table, call tree, Hatchet JSON,

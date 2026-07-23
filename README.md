@@ -287,7 +287,10 @@ python examples/qwen_megakernel.py
 ## Documentation
 
 - [`docs/api-reference.md`](docs/api-reference.md) — exhaustive op-by-op
-  reference (30 sections, every primitive).
+  reference (40 sections, every primitive).
+- [`docs/profiler.md`](docs/profiler.md) — the Enigma profiler: hierarchical
+  scopes, derived throughput, call-path analysis, unbiased GPU-timestamp
+  benchmarking, Xcode `.gputrace` capture.
 - [`Enigma-Dialect/`](Enigma-Dialect/) — submodule with the C++/MLIR dialect
   definition, MSL emitter, and dialect-level lit tests.
 
@@ -304,6 +307,16 @@ bash Enigma-Dialect/test/run_tests.sh --gpu          # plus GPU dispatch
 MIT. See [`LICENSE`](LICENSE).
 
 ## Versions
+
+**v0.2.0** — the Enigma profiler (`enigma.profile`, hierarchical scopes,
+derived GFLOP/s and GB/s, call-path analysis, kernel launch hooks, Hatchet
+and Chrome-trace export, unbiased GPU-timestamp `benchmark_kernel`, Xcode
+`.gputrace` capture). Same compiled dialect as v0.1.2 — pure-Python addition,
+no MLIR/dialect changes. Published as a
+[GitHub release](https://github.com/Klyne-org/Enigma-DSL/releases/tag/v0.2.0)
+with the full six-wheel matrix; PyPI publish pending.
+
+**v0.1.2** — async-copy fixes and CI reliability work.
 
 **v0.1.1** — first PyPI release. Six merged wheels published
 (`enigma_dsl-0.1.1-cp{311,312,313}-cp{311,312,313}-macosx_{14_0,15_0}_arm64`).
